@@ -82,3 +82,22 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+
+# 外部二进制工具
+BBDown
+
+# 下载的临时视频/音频
+downloads/
+bili_video.*
+bili_sub.*
+*_extracted.wav
+
+
+# 数据文件（忽略内容，保留目录结构）
+data/*
+!data/.gitkeep
+# 下载的临时视频/音频/字幕
+downloads/*
+!downloads/.gitkeep
+# 外部二进制工具
+BBDown
