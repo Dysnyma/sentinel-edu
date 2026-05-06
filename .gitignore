@@ -1,0 +1,84 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+.venv
+
+# Database files (SQLite)
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary audio/video files (generated during processing)
+*.wav
+*.mp3
+*.m4a
+*.mp4
+*.flv
+*.mkv
+*_extracted.wav
+
+# Downloaded Bilibili content
+bili_video.*
+bili_sub.*
+
+# Output JSONL test data (optional, but often want to regenerate)
+# *.jsonl
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE / VSCode
+.vscode/
+.idea/
+
+# Streamlit specific
+.streamlit/
+
+# Logs and databases
+*.log
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+PIPFILE.lock
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
