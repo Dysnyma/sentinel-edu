@@ -60,10 +60,10 @@ def download_bilibili_video(url: str, bbdown_path='./BBDown') -> dict:
 
     video_file = None
     subtitle_file = None
-    for f in Path(downloads_dir).glob('*'):
-        if f.suffix in ['.mp4', '.flv', '.mkv']:
+    for f in Path(downloads_dir).rglob('*'):
+        if f.suffix in ['.mp4', '.flv', '.mkv'] and video_file is None:
             video_file = str(f)
-        elif f.suffix in ['.cc', '.srt', '.ass', '.vtt']:
+        elif f.suffix in ['.cc', '.srt', '.ass', '.vtt'] and subtitle_file is None:
             subtitle_file = str(f)
 
     return {'video': video_file, 'subtitle': subtitle_file}

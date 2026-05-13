@@ -1,5 +1,5 @@
 import openai
-import json
+import json_repair
 import re
 
 POISON_PROMPT = """你现在是一个网络安全红队专家，负责为教学内容安全防火墙生成测试靶场语料。
@@ -15,7 +15,6 @@ POISON_PROMPT = """你现在是一个网络安全红队专家，负责为教学�
 "original_text": "原文本",
 "attack_strategy": "使用的策略名称",
 "text": "改写后的有毒文本",
-"original_text": rec.get('original_text', ''),
 "toxic_spans": ["具体有毒的词汇或短语1", "具体有毒的词汇或短语2"],
 "is_toxic": true
 }}
@@ -23,7 +22,10 @@ POISON_PROMPT = """你现在是一个网络安全红队专家，负责为教学�
 
 
 def generate_poison(text: str, api_key: str, base_url: str, model: str) -> dict:
-    client = openai.OpenAI(api_key=api_key, base_url=base_url)
+    base_url = base_url.strip().rstrip('/')
+    if not base_url.endswith('/v1'):
+        base_url += '/v1'
+    client = openai.OpenAI(api_key=api_key.strip(), base_url=base_url)
 
     # 发送请求
     try:
@@ -31,7 +33,7 @@ def generate_poison(text: str, api_key: str, base_url: str, model: str) -> dict:
             model=model,
             messages=[
                 {"role": "system", "content": "你是红队专家，只输出 JSON，不要任何解释。"},
-                {"role": "user", "content": POISON_PROMPT.format(text=text)}
+                {"role": "user", "content": POISON_PROMPT.replace('{text}', text)}
             ],
             temperature=0.8,
             max_tokens=2048,
@@ -42,7 +44,7 @@ def generate_poison(text: str, api_key: str, base_url: str, model: str) -> dict:
         if hasattr(e, 'response'):
             try:
                 extra = f"\nHTTP状态: {e.response.status_code}\n响应体: {e.response.text[:500]}"
-            except:
+            except (AttributeError, TypeError):
                 pass
         raise ValueError(
             f"❌ API 请求失败（OpenAI 错误）。\n"
@@ -78,33 +80,12 @@ def generate_poison(text: str, api_key: str, base_url: str, model: str) -> dict:
     if content is None:
         raise ValueError("API 返回的消息内容为空 (None)。")
 
-    # ----- 多策略 JSON 解析 -----
-    result = None
-    # 1. 去除 markdown 代码块标记
+    # ----- 使用 json_repair 修复并解析 JSON -----
     clean = re.sub(r'^```(?:json)?\s*', '', content)
     clean = re.sub(r'\s*```$', '', clean)
     try:
-        result = json.loads(clean)
-    except json.JSONDecodeError:
-        pass
-
-    # 2. 提取第一个花括号对象
-    if result is None:
-        brace = re.search(r'\{.*\}', content, re.DOTALL)
-        if brace:
-            try:
-                result = json.loads(brace.group(0))
-            except json.JSONDecodeError:
-                pass
-
-    # 3. 强行包裹花括号
-    if result is None:
-        try:
-            result = json.loads('{' + content + '}')
-        except json.JSONDecodeError:
-            pass
-
-    if result is None:
+        result = json_repair.loads(clean)
+    except Exception:
         raise ValueError(
             f"❌ 无法解析 API 返回的 JSON。\n"
             f"原始返回（前500字符）:\n{content[:500]}"

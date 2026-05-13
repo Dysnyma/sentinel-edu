@@ -17,14 +17,15 @@ def save_config_to_file():
 
 
 def load_config_from_file():
+    """从文件加载配置，文件中有值的字段直接覆盖 session_state（含默认值）"""
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 config = json.load(f)
             for key, value in config.items():
-                if key not in st.session_state or not st.session_state[key]:
+                if value:  # 文件中非空的值才覆盖
                     st.session_state[key] = value
-        except:
+        except (json.JSONDecodeError, OSError):
             pass
 
 

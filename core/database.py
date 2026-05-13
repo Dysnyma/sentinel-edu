@@ -22,32 +22,48 @@ def init_db():
                     llm_time REAL,
                     llm_spans TEXT
                 )''')
-    # 兼容旧表没有 llm_spans 字段的情况
-    try:
-        c.execute("SELECT llm_spans FROM results LIMIT 1")
-    except sqlite3.OperationalError:
-        c.execute("ALTER TABLE results ADD COLUMN llm_spans TEXT")
+    # 兼容旧表缺少字段的情况
+    for col, col_type in [('llm_spans', 'TEXT'), ('llm_reason', 'TEXT')]:
+        try:
+            c.execute(f"SELECT {col} FROM results LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute(f"ALTER TABLE results ADD COLUMN {col} {col_type}")
     conn.commit()
     conn.close()
 
 
-def save_result(text_id, true_label, dfa_pred, llm_pred, hit_words, dfa_time, llm_time, llm_spans=None):
+def save_result(text_id, true_label, dfa_pred, llm_pred, hit_words, dfa_time, llm_time, llm_spans=None, llm_reason=None):
+    """保存检测结果。已有的非默认值（非 -1 / 空字符串）会被保留。"""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute('''INSERT OR REPLACE INTO results 
-                 (text_id, true_label, dfa_pred, llm_pred, hit_words, dfa_time, llm_time, llm_spans)
-                 VALUES (?,?,?,?,?,?,?,?)''',
-              (text_id, true_label, dfa_pred, llm_pred, json.dumps(hit_words, ensure_ascii=False),
-               dfa_time, llm_time, json.dumps(llm_spans or [], ensure_ascii=False)))
+    c.execute("SELECT dfa_pred, llm_pred, hit_words, llm_spans, llm_reason FROM results WHERE text_id = ?", (text_id,))
+    row = c.fetchone()
+    if row:
+        ex_dfa, ex_llm, ex_hw, ex_ls, ex_reason = row
+        final_dfa = dfa_pred if dfa_pred != -1 else ex_dfa
+        final_llm = llm_pred if llm_pred != -1 else ex_llm
+        final_hw = json.dumps(hit_words, ensure_ascii=False) if hit_words is not None else ex_hw
+        final_ls = json.dumps(llm_spans or [], ensure_ascii=False) if llm_spans is not None else ex_ls
+        final_reason = llm_reason if llm_reason is not None else ex_reason
+    else:
+        final_dfa = dfa_pred
+        final_llm = llm_pred
+        final_hw = json.dumps(hit_words, ensure_ascii=False)
+        final_ls = json.dumps(llm_spans or [], ensure_ascii=False)
+        final_reason = llm_reason or ''
+    c.execute('''INSERT OR REPLACE INTO results
+                 (text_id, true_label, dfa_pred, llm_pred, hit_words, dfa_time, llm_time, llm_spans, llm_reason)
+                 VALUES (?,?,?,?,?,?,?,?,?)''',
+              (text_id, true_label, final_dfa, final_llm, final_hw, dfa_time, llm_time, final_ls, final_reason or ''))
     conn.commit()
     conn.close()
 
 
-def update_llm_result(text_id, llm_pred, llm_time, llm_spans=None):
+def update_llm_result(text_id, llm_pred, llm_time, llm_spans=None, llm_reason=None):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute('''UPDATE results SET llm_pred = ?, llm_time = ?, llm_spans = ? WHERE text_id = ?''',
-              (llm_pred, llm_time, json.dumps(llm_spans or [], ensure_ascii=False), text_id))
+    c.execute('''UPDATE results SET llm_pred = ?, llm_time = ?, llm_spans = ?, llm_reason = ? WHERE text_id = ?''',
+              (llm_pred, llm_time, json.dumps(llm_spans or [], ensure_ascii=False), llm_reason or '', text_id))
     conn.commit()
     conn.close()
 
