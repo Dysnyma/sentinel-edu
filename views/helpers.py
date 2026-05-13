@@ -115,7 +115,7 @@ def safe_json_loads(value):
         return []
 
 
-def run_concurrently(tasks, max_workers=3, progress_placeholder=None, progress_text=""):
+def run_concurrently(tasks, max_workers=6, progress_placeholder=None, progress_text=""):
     """并发执行任务列表，返回结果列表（按输入顺序）。自动显示进度和预计剩余时间。"""
     import time
     results = [None] * len(tasks)

@@ -42,3 +42,41 @@ def init_config():
             st.session_state[k] = v
     # 尝试从文件加载（仅在首次初始化时覆盖空值）
     load_config_from_file()
+
+
+# ---- 会话状态持久化 ----
+
+SESSION_STATE_FILE = os.path.join('data', 'session_state.json')
+_SESSION_KEYS = ['_current_dataset_id', '_tab2_current_ids', 'last_dataset_title']
+
+
+def save_session_state():
+    """将关键 session_state 键写入磁盘，使重启后能恢复"""
+    os.makedirs('data', exist_ok=True)
+    payload = {}
+    for k in _SESSION_KEYS:
+        v = st.session_state.get(k)
+        if v is not None:
+            if isinstance(v, set):
+                v = list(v)
+            payload[k] = v
+    try:
+        with open(SESSION_STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def load_session_state():
+    """从磁盘恢复关键 session_state 键"""
+    if not os.path.exists(SESSION_STATE_FILE):
+        return
+    try:
+        with open(SESSION_STATE_FILE, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+        for k, v in payload.items():
+            if k == '_tab2_current_ids' and isinstance(v, list):
+                v = set(v)
+            st.session_state[k] = v
+    except (json.JSONDecodeError, OSError):
+        pass

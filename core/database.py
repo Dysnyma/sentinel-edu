@@ -10,7 +10,6 @@ def init_db():
     os.makedirs('data', exist_ok=True)
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    # 创建表（若不存在）
     c.execute('''CREATE TABLE IF NOT EXISTS results (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     text_id TEXT UNIQUE,
@@ -23,7 +22,10 @@ def init_db():
                     llm_spans TEXT
                 )''')
     # 兼容旧表缺少字段的情况
-    for col, col_type in [('llm_spans', 'TEXT'), ('llm_reason', 'TEXT')]:
+    for col, col_type in [
+        ('llm_spans', 'TEXT'), ('llm_reason', 'TEXT'),
+        ('dataset_id', 'TEXT'), ('text', 'TEXT'),
+    ]:
         try:
             c.execute(f"SELECT {col} FROM results LIMIT 1")
         except sqlite3.OperationalError:
@@ -32,7 +34,8 @@ def init_db():
     conn.close()
 
 
-def save_result(text_id, true_label, dfa_pred, llm_pred, hit_words, dfa_time, llm_time, llm_spans=None, llm_reason=None):
+def save_result(text_id, true_label, dfa_pred, llm_pred, hit_words, dfa_time, llm_time,
+                llm_spans=None, llm_reason=None, dataset_id=None, text=None):
     """保存检测结果。已有的非默认值（非 -1 / 空字符串）会被保留。"""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -52,9 +55,11 @@ def save_result(text_id, true_label, dfa_pred, llm_pred, hit_words, dfa_time, ll
         final_ls = json.dumps(llm_spans or [], ensure_ascii=False)
         final_reason = llm_reason or ''
     c.execute('''INSERT OR REPLACE INTO results
-                 (text_id, true_label, dfa_pred, llm_pred, hit_words, dfa_time, llm_time, llm_spans, llm_reason)
-                 VALUES (?,?,?,?,?,?,?,?,?)''',
-              (text_id, true_label, final_dfa, final_llm, final_hw, dfa_time, llm_time, final_ls, final_reason or ''))
+                 (text_id, true_label, dfa_pred, llm_pred, hit_words, dfa_time, llm_time,
+                  llm_spans, llm_reason, dataset_id, text)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+              (text_id, true_label, final_dfa, final_llm, final_hw, dfa_time, llm_time,
+               final_ls, final_reason or '', dataset_id, text))
     conn.commit()
     conn.close()
 
@@ -73,3 +78,21 @@ def get_all_results():
     df = pd.read_sql_query("SELECT * FROM results", conn)
     conn.close()
     return df
+
+
+def get_results_by_dataset(dataset_id):
+    """按数据集 ID 查询检测结果"""
+    conn = sqlite3.connect(DB_NAME)
+    df = pd.read_sql_query("SELECT * FROM results WHERE dataset_id = ?", conn, params=(dataset_id,))
+    conn.close()
+    return df
+
+
+def get_dataset_ids():
+    """列出所有已扫描过的数据集 ID"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT DISTINCT dataset_id FROM results WHERE dataset_id IS NOT NULL ORDER BY dataset_id")
+    ids = [row[0] for row in c.fetchall()]
+    conn.close()
+    return ids

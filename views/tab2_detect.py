@@ -7,14 +7,15 @@ from pathlib import Path
 
 from core.dfa_scanner import DFAScanner
 from core.llm_scanner import llm_scan
-from core.database import init_db, save_result, get_all_results, update_llm_result
+from core.database import init_db, save_result, get_all_results, update_llm_result, get_results_by_dataset
+from core.config import save_session_state
 from core.utils import load_jsonl, list_datasets
 from views.helpers import (
     context_snippet, strategy_to_color, safe_json_loads, to_native, run_concurrently
 )
 
 
-def _init_db_records(all_data):
+def _init_db_records(all_data, dataset_id):
     """为新样本插入初始记录（避免覆盖已有检测结果）"""
     init_db()
     existing_all = get_all_results()
@@ -24,12 +25,13 @@ def _init_db_records(all_data):
             continue
         true_label = 1 if rec.get('is_toxic') else 0
         try:
-            save_result(rec['id'], true_label, -1, -1, [], 0, 0, [])
+            save_result(rec['id'], true_label, -1, -1, [], 0, 0, [],
+                        dataset_id=dataset_id, text=rec.get('text', ''))
         except Exception:
             pass
 
 
-def _dfa_scan_all(all_data, progress_placeholder=None):
+def _dfa_scan_all(all_data, dataset_id, progress_placeholder=None):
     """DFA 全量扫描，返回 {text_id: (dfa_hit, dfa_words)} 并写库"""
     import time
     scanner = DFAScanner('sensitive_words.txt')
@@ -42,7 +44,9 @@ def _dfa_scan_all(all_data, progress_placeholder=None):
         results[rec['id']] = (dfa_hit, dfa_words)
         true_label = 1 if rec.get('is_toxic') else 0
         reason = f'[显性敏感词]：命中关键词 "{", ".join(dfa_words)}"' if dfa_hit else None
-        save_result(rec['id'], true_label, int(dfa_hit), -1, dfa_words, 0, 0, llm_spans=None, llm_reason=reason)
+        save_result(rec['id'], true_label, int(dfa_hit), -1, dfa_words, 0, 0,
+                    llm_spans=None, llm_reason=reason,
+                    dataset_id=dataset_id, text=text)
         if progress_placeholder is not None:
             elapsed = time.time() - t_start
             eta = (elapsed / (i + 1)) * (total - i - 1) if i > 0 else 0
@@ -53,7 +57,7 @@ def _dfa_scan_all(all_data, progress_placeholder=None):
     return results
 
 
-def _llm_scan_candidates(candidates, api_key, base_url, llm_model, concurrency):
+def _llm_scan_candidates(candidates, api_key, base_url, llm_model, concurrency, dataset_id):
     """对候选文本并发执行 LLM 扫描并写库"""
     progress_bar = st.progress(0, text="二防 LLM 扫描中...")
     tasks = [(llm_scan, (rec['text'], api_key, base_url, llm_model, dfa_words))
@@ -73,7 +77,8 @@ def _llm_scan_candidates(candidates, api_key, base_url, llm_model, concurrency):
             category = res.get('category', '隐性偏颇')
             reason_text = res.get('reason', '')
             llm_reason = f'[{category}]：{reason_text}' if llm_pred == 1 else ''
-        save_result(rec['id'], true_label, -1, llm_pred, None, 0, llm_time, llm_spans, llm_reason=llm_reason)
+        save_result(rec['id'], true_label, -1, llm_pred, None, 0, llm_time, llm_spans,
+                    llm_reason=llm_reason, dataset_id=dataset_id, text=rec.get('text', ''))
     progress_bar.empty()
 
 
@@ -409,11 +414,14 @@ def render_tab2(api_ready, api_key, base_url, llm_model, concurrency):
 
     test_file_path = file_options[selected_label]
     all_data = load_jsonl(test_file_path)
+    dataset_id = os.path.basename(test_file_path)
+    st.session_state['_current_dataset_id'] = dataset_id
     st.success(f"已加载 {len(all_data)} 条样本，其中 {sum(1 for r in all_data if r.get('is_toxic'))} 条有毒")
 
-    _init_db_records(all_data)
+    _init_db_records(all_data, dataset_id)
     current_ids = {r['id'] for r in all_data}
     st.session_state['_tab2_current_ids'] = current_ids
+    save_session_state()
 
     # ----- 功能按钮区 -----
     st.subheader("批量检测")
@@ -423,14 +431,14 @@ def render_tab2(api_ready, api_key, base_url, llm_model, concurrency):
         if st.button("🚀 自动检测 (DFA → LLM)", type="primary", disabled=not api_ready, width='stretch'):
             # — 阶段1：DFA 全量扫描（收集线索）—
             progress = st.progress(0, text="一防 DFA 扫描中...")
-            dfa_results = _dfa_scan_all(all_data, progress_placeholder=progress)
+            dfa_results = _dfa_scan_all(all_data, dataset_id, progress_placeholder=progress)
             progress.empty()
             dfa_hit_count = sum(1 for hit, _ in dfa_results.values() if hit)
 
             # — 阶段2：LLM 全量扫描（DFA 命中≠有毒，LLM 结合上下文做最终判决）—
             # 所有文本都送 LLM，DFA 命中词作为线索（LLM 会甄别否定句/引述等正当语境）
             all_candidates = [(rec, dfa_results[rec['id']][1]) for rec in all_data]
-            _llm_scan_candidates(all_candidates, api_key, base_url, llm_model, concurrency)
+            _llm_scan_candidates(all_candidates, api_key, base_url, llm_model, concurrency, dataset_id)
 
             st.success(
                 f"检测完成！DFA 发现 {dfa_hit_count} 个关键词线索，"
@@ -440,7 +448,7 @@ def render_tab2(api_ready, api_key, base_url, llm_model, concurrency):
     with col_debug1:
         if st.button("🔰 仅 DFA 扫描", width='stretch'):
             progress = st.progress(0, text="DFA 扫描中...")
-            _dfa_scan_all(all_data, progress_placeholder=progress)
+            _dfa_scan_all(all_data, dataset_id, progress_placeholder=progress)
             progress.empty()
             st.success("DFA 扫描完成")
 
@@ -470,11 +478,20 @@ def render_tab2(api_ready, api_key, base_url, llm_model, concurrency):
                     existing_row = df[df['text_id'] == rec['id']]
                     dfa_pred = existing_row['dfa_pred'].values[0] if not existing_row.empty else -1
                     dfa_hit_words = safe_json_loads(existing_row['hit_words'].values[0]) if not existing_row.empty else []
-                    save_result(rec['id'], true_label, dfa_pred, llm_pred, dfa_hit_words, 0, llm_time, llm_spans, llm_reason=llm_reason)
+                    save_result(rec['id'], true_label, dfa_pred, llm_pred, dfa_hit_words, 0, llm_time, llm_spans,
+                                llm_reason=llm_reason, dataset_id=dataset_id, text=rec.get('text', ''))
             st.success("LLM 扫描完成")
 
     # ----- 结果展示 -----
     df_all = get_all_results()
     df_all = _render_status_table(df_all, current_ids)
+
+    # CSV 导出按钮
+    if not df_all.empty:
+        csv = df_all.to_csv(index=False)
+        st.download_button("📥 导出 CSV", data=csv,
+                           file_name=f"{dataset_id.replace('.jsonl','')}_results.csv",
+                           mime="text/csv")
+
     _render_batch_highlight(df_all, all_data)
     _render_detail_view(df_all, all_data)

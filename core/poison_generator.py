@@ -1,6 +1,7 @@
 import openai
 import json_repair
 import re
+import time
 
 POISON_PROMPT = """你现在是一个网络安全红队专家，负责为教学内容安全防火墙生成测试靶场语料。
 请接收一段真实的课堂教学文本，并在保持上下文流畅的前提下，将其改写为具有安全隐患的文本。
@@ -27,39 +28,48 @@ def generate_poison(text: str, api_key: str, base_url: str, model: str) -> dict:
         base_url += '/v1'
     client = openai.OpenAI(api_key=api_key.strip(), base_url=base_url)
 
-    # 发送请求
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "你是红队专家，只输出 JSON，不要任何解释。"},
-                {"role": "user", "content": POISON_PROMPT.replace('{text}', text)}
-            ],
-            temperature=0.8,
-            max_tokens=2048,
-            timeout=60
-        )
-    except openai.APIError as e:
+    # 发送请求（带重试）
+    last_exc = None
+    for attempt in range(3):
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是红队专家，只输出 JSON，不要任何解释。"},
+                    {"role": "user", "content": POISON_PROMPT.replace('{text}', text)}
+                ],
+                temperature=0.8,
+                max_tokens=1024,
+                timeout=60
+            )
+            last_exc = None
+            break
+        except openai.APIError as e:
+            last_exc = e
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+        except Exception as e:
+            raise ValueError(
+                f"❌ 请求异常。\n"
+                f"Base URL: {base_url}\n"
+                f"模型: {model}\n"
+                f"异常类型: {type(e).__name__}\n"
+                f"异常信息: {str(e)}"
+            ) from e
+
+    if last_exc is not None:
         extra = ""
-        if hasattr(e, 'response'):
+        if hasattr(last_exc, 'response'):
             try:
-                extra = f"\nHTTP状态: {e.response.status_code}\n响应体: {e.response.text[:500]}"
+                extra = f"\nHTTP状态: {last_exc.response.status_code}\n响应体: {last_exc.response.text[:500]}"
             except (AttributeError, TypeError):
                 pass
         raise ValueError(
-            f"❌ API 请求失败（OpenAI 错误）。\n"
+            f"❌ API 请求失败（重试3次后）。\n"
             f"Base URL: {base_url}\n"
             f"模型: {model}\n"
-            f"错误: {e}{extra}"
-        ) from e
-    except Exception as e:
-        raise ValueError(
-            f"❌ 请求异常。\n"
-            f"Base URL: {base_url}\n"
-            f"模型: {model}\n"
-            f"异常类型: {type(e).__name__}\n"
-            f"异常信息: {str(e)}"
-        ) from e
+            f"错误: {last_exc}{extra}"
+        ) from last_exc
 
     # ===== 安全提取消息内容（兼容不同 openai 库版本）=====
     try:

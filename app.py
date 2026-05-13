@@ -4,12 +4,14 @@ import os
 import shutil
 from pathlib import Path
 
-from core.config import init_config, save_config_to_file, CONFIG_FILE
+from core.config import init_config, save_config_to_file, CONFIG_FILE, load_session_state
 from core.database import init_db
+from core.asr import is_whisper_model_downloaded
 from views.helpers import check_api_connection
 from views.tab1_build import render_tab1
 from views.tab2_detect import render_tab2
 from views.tab3_analysis import render_tab3
+from views.tab4_learn import render_tab4
 
 # ---------- 页面配置 ----------
 st.set_page_config(
@@ -20,6 +22,7 @@ st.set_page_config(
 
 # ---------- 初始化 ----------
 init_config()
+load_session_state()
 init_db()
 os.makedirs("data", exist_ok=True)
 os.makedirs("downloads", exist_ok=True)
@@ -60,6 +63,10 @@ if use_local_whisper:
         "模型大小", ["tiny", "base", "small", "medium", "large"],
         index=2, help="越大越准确，但更慢更占内存。推荐 small 或 medium。"
     )
+    if is_whisper_model_downloaded(local_whisper_model):
+        st.sidebar.caption(f"✅ Whisper {local_whisper_model} 模型已下载")
+    else:
+        st.sidebar.caption(f"📥 Whisper {local_whisper_model} 模型未下载，首次使用时将自动下载")
 
 # 工具状态
 st.sidebar.subheader("系统工具状态")
@@ -100,7 +107,7 @@ api_ready = bool(api_key) and bool(base_url) and bool(llm_model)
 st.title("🛡️ 课堂思政元素安全性分析原型系统")
 st.markdown("---")
 
-tab1, tab2, tab3 = st.tabs(["📦 测试集构建", "🔍 安全检测", "📊 可视化分析"])
+tab1, tab2, tab3, tab4 = st.tabs(["📦 测试集构建", "🔍 安全检测", "📊 可视化分析", "🧠 自学习优化"])
 
 with tab1:
     render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
@@ -111,3 +118,6 @@ with tab2:
 
 with tab3:
     render_tab3()
+
+with tab4:
+    render_tab4()

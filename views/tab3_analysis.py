@@ -3,8 +3,9 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import io
 
-from core.database import get_all_results
+from core.database import get_all_results, get_results_by_dataset, get_dataset_ids
 
 
 def render_tab3():
@@ -14,12 +15,33 @@ def render_tab3():
         st.warning("暂无检测数据，请先运行检测")
         return
 
-    # 只统计当前 JSONL 的样本（与 Tab2 保持一致）
+    # 过滤逻辑：优先用 Tab2 传入的 current_ids，其次用持久化的 dataset_id
     current_ids = st.session_state.get('_tab2_current_ids', None)
+    dataset_id = st.session_state.get('_current_dataset_id', None)
+
     if current_ids is not None:
         df = df[df['text_id'].isin(current_ids)].copy()
+    elif dataset_id is not None:
+        df = df[df['dataset_id'] == dataset_id].copy()
+        if df.empty:
+            df_alt = get_results_by_dataset(dataset_id)
+            if not df_alt.empty:
+                df = df_alt
+    else:
+        # 无任何过滤条件：让用户选择数据集
+        all_ids = get_dataset_ids()
+        if all_ids:
+            choice = st.selectbox("选择要分析的数据集", all_ids)
+            if choice:
+                df = get_results_by_dataset(choice)
+                if df.empty:
+                    df = get_all_results()
+                    df = df[df['dataset_id'] == choice].copy()
+        else:
+            df = df.copy()
+
     if df.empty:
-        st.info('暂无当前文件的检测数据')
+        st.info("暂无当前文件的检测数据，请先运行扫描")
         return
 
     # 强制转为数值类型
@@ -66,6 +88,14 @@ def render_tab3():
         col12.metric("已检测样本", len(scanned))
     else:
         st.info(f"共 {total} 条样本，均未检测。请先运行扫描。")
+
+    # Excel 导出按钮
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='扫描结果')
+    st.download_button("📥 导出 Excel", data=buf.getvalue(),
+                       file_name=f"{dataset_id.replace('.jsonl','') if dataset_id else 'scan'}_results.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     fig1 = px.pie(
         names=['有毒', '无毒'],

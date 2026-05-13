@@ -35,17 +35,33 @@ def llm_scan(text: str, api_key: str, base_url: str, model: str, dfa_words: list
     else:
         dfa_hint = "前置关键词扫描（DFA）未发现敏感词，请重点检查是否存在隐性违规。"
 
-    try:
-        resp = client.chat.completions.create(
+    def _call_api():
+        return client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": "你是内容安全审核专家，只输出 JSON。"},
                 {"role": "user", "content": SCAN_PROMPT.replace('{dfa_hint}', dfa_hint).replace('{text}', text)}
             ],
             temperature=0.0,
-            max_tokens=1024,
+            max_tokens=512,
             timeout=30
         )
+
+    last_exc = None
+    for attempt in range(3):
+        try:
+            resp = _call_api()
+            last_exc = None
+            break
+        except (openai.APIStatusError, openai.APITimeoutError, openai.APIConnectionError) as e:
+            last_exc = e
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+
+    if last_exc:
+        raise ValueError(f"LLM 扫描 API 失败（重试3次后）: {last_exc}") from last_exc
+
+    try:
         # 防御：兼容部分代理/网关直接返回字符串的情况
         if isinstance(resp, str):
             raise ValueError(f"API 返回了字符串而非标准响应对象（可能 base_url 指向了网页地址）。内容预览: {resp[:200]}")
