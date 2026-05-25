@@ -119,6 +119,15 @@ def _generate_dataset_title(jsonl_path, api_key, base_url, model):
     return '测试集'
 
 
+def delete_dataset(dataset_path):
+    """删除指定的数据集（JSONL + meta.json）"""
+    p = Path(dataset_path)
+    meta = p.with_suffix('.meta.json')
+    for f in (p, meta):
+        if f.exists():
+            f.unlink()
+
+
 def list_datasets():
     """列出 data/datasets/ 下所有已保存的数据集"""
     datasets_dir = os.path.join('data', 'datasets')

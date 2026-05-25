@@ -9,7 +9,7 @@ from core.dfa_scanner import DFAScanner
 from core.llm_scanner import llm_scan
 from core.database import init_db, save_result, get_all_results, update_llm_result, get_results_by_dataset
 from core.config import save_session_state
-from core.utils import load_jsonl, list_datasets
+from core.utils import load_jsonl, list_datasets, delete_dataset
 from views.helpers import (
     context_snippet, strategy_to_color, safe_json_loads, to_native, run_concurrently
 )
@@ -399,20 +399,42 @@ def render_tab2(api_ready, api_key, base_url, llm_model, concurrency):
         return
 
     # --- 文件模式 ---
-    # 收集所有可用文件：data/*.jsonl + data/datasets/*.jsonl
-    file_options = {f.name: os.path.join("data", f.name) for f in Path("data").glob('*.jsonl')}
-    saved = list_datasets()
-    for ds in saved:
-        label = f"💾 {ds['title']} ({ds['created']}, {ds['total']}条)"
-        file_options[label] = ds['path']
+    file_category = st.radio(
+        "文件来源", ["📂 中间产物（临时文件）", "💾 已保存数据集"], horizontal=True)
 
-    selected_label = st.selectbox("选择测试集文件", options=list(file_options.keys()),
-                                  index=0 if file_options else None)
-    if not selected_label:
-        st.info("请先构建测试集，或切换到「直接输入文本」模式")
-        st.stop()
+    if file_category == "📂 中间产物（临时文件）":
+        temp_files = {f.name: os.path.join("data", f.name)
+                      for f in sorted(Path("data").glob('*.jsonl'))}
+        if not temp_files:
+            st.info("暂无临时文件，请先在「测试集构建」中生成")
+            st.stop()
+        selected_label = st.selectbox("选择临时文件", options=list(temp_files.keys()))
+        if not selected_label:
+            st.stop()
+        test_file_path = temp_files[selected_label]
+    else:
+        saved = list_datasets()
+        if not saved:
+            st.info("暂无已保存的数据集，请在「测试集构建」中生成并保存")
+            st.stop()
+        options = {f"💾 {ds['title']} ({ds['created']}, {ds['total']}条)": ds
+                   for ds in saved}
+        selected_label = st.selectbox("选择已保存的数据集", options=list(options.keys()))
+        if not selected_label:
+            st.stop()
+        selected_ds = options[selected_label]
+        test_file_path = selected_ds['path']
 
-    test_file_path = file_options[selected_label]
+        # 删除按钮
+        col_info, col_del = st.columns([3, 1])
+        with col_del:
+            with st.popover("🗑️ 删除此数据集"):
+                st.warning(f"确定要删除「{selected_ds['title']}」吗？")
+                st.caption(f"文件：{selected_ds['path']}")
+                if st.button("确认删除", type="primary"):
+                    delete_dataset(selected_ds['path'])
+                    st.success("已删除")
+                    st.rerun()
     all_data = load_jsonl(test_file_path)
     dataset_id = os.path.basename(test_file_path)
     st.session_state['_current_dataset_id'] = dataset_id

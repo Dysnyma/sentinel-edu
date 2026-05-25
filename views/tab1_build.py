@@ -259,19 +259,41 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
 
             merge_jsonl(clean_path, poison_file, 'data/final_test_mixed.jsonl')
             st.session_state['final_test'] = 'data/final_test_mixed.jsonl'
+            st.session_state['_poison_generated'] = True
 
-            try:
-                saved_path, auto_title = save_dataset(
-                    'data/final_test_mixed.jsonl', None,
-                    api_key, base_url, llm_model)
-                st.session_state['last_dataset_title'] = auto_title
-            except Exception:
-                saved_path, auto_title = None, '测试集'
+            # 用 AI 自动生成标题建议
+            from core.utils import _generate_dataset_title
+            ai_title = None
+            if api_key and base_url and llm_model:
+                try:
+                    ai_title = _generate_dataset_title(
+                        'data/final_test_mixed.jsonl', api_key, base_url, llm_model)
+                except Exception:
+                    pass
+            st.session_state['_ai_suggested_title'] = ai_title or '测试集'
 
             st.success(
                 f"投毒完成！共生成 {len(poisoned_records)} 条有毒文本，最终混合集：data/final_test_mixed.jsonl")
-            if saved_path:
-                st.caption(f"💾 已保存数据集副本：`{saved_path}`")
+
+    # 投毒完成后显示 AI 命名 + 保存按钮（独立于按钮点击，持久显示）
+    if st.session_state.get('_poison_generated') and os.path.exists('data/final_test_mixed.jsonl'):
+        st.markdown("---")
+        st.subheader("💾 保存测试集")
+        ai_title = st.session_state.get('_ai_suggested_title', '测试集')
+        col_title, col_btn = st.columns([3, 1])
+        with col_title:
+            final_title = st.text_input(
+                "数据集标题", value=ai_title,
+                help="可修改 AI 建议的标题", key="dataset_title_input")
+        with col_btn:
+            st.write("")  # 对齐
+            if st.button("💾 确认保存", type="primary", use_container_width=True):
+                saved_path, saved_title = save_dataset(
+                    'data/final_test_mixed.jsonl', final_title)
+                st.session_state['last_dataset_title'] = saved_title
+                st.session_state['_poison_generated'] = False
+                st.success(f"已保存至：`{saved_path}`")
+                st.rerun()
 
             final_data = load_jsonl('data/final_test_mixed.jsonl')
             toxic_samples = [r for r in final_data if r.get('is_toxic')]
