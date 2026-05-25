@@ -136,11 +136,10 @@ def render_tab3():
             x=['预测安全', '预测有毒'],
             y=['真实安全', '真实有毒'],
             text_auto=True,
-            coloraxis="coloraxis",
+            color_continuous_scale='Reds',
             title="双防联合判定混淆矩阵",
             labels=dict(x="预测类别", y="真实类别", color="样本数"),
         )
-        fig_cm.update_layout(coloraxis=dict(colorscale='Reds'))
         st.plotly_chart(fig_cm, width='stretch')
 
         # ========== 双防独立指标对比 ==========
