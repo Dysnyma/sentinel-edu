@@ -6,9 +6,16 @@ import pandas as pd
 DB_NAME = os.path.join('data', 'scan_results.db')
 
 
+def _connect():
+    """统一建连：设置 busy timeout，避免多线程/多会话并发写入时 'database is locked'。"""
+    conn = sqlite3.connect(DB_NAME, timeout=30)
+    conn.execute('PRAGMA journal_mode=WAL')  # WAL 模式允许读写并发，显著降低锁冲突
+    return conn
+
+
 def init_db():
     os.makedirs('data', exist_ok=True)
-    conn = sqlite3.connect(DB_NAME)
+    conn = _connect()
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS results (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,7 +44,7 @@ def init_db():
 def save_result(text_id, true_label, dfa_pred, llm_pred, hit_words, dfa_time, llm_time,
                 llm_spans=None, llm_reason=None, dataset_id=None, text=None):
     """保存检测结果。已有的非默认值（非 -1 / 空字符串）会被保留。"""
-    conn = sqlite3.connect(DB_NAME)
+    conn = _connect()
     c = conn.cursor()
     c.execute("SELECT dfa_pred, llm_pred, hit_words, llm_spans, llm_reason FROM results WHERE text_id = ?", (text_id,))
     row = c.fetchone()
@@ -65,7 +72,7 @@ def save_result(text_id, true_label, dfa_pred, llm_pred, hit_words, dfa_time, ll
 
 
 def update_llm_result(text_id, llm_pred, llm_time, llm_spans=None, llm_reason=None):
-    conn = sqlite3.connect(DB_NAME)
+    conn = _connect()
     c = conn.cursor()
     c.execute('''UPDATE results SET llm_pred = ?, llm_time = ?, llm_spans = ?, llm_reason = ? WHERE text_id = ?''',
               (llm_pred, llm_time, json.dumps(llm_spans or [], ensure_ascii=False), llm_reason or '', text_id))
@@ -74,7 +81,7 @@ def update_llm_result(text_id, llm_pred, llm_time, llm_spans=None, llm_reason=No
 
 
 def get_all_results():
-    conn = sqlite3.connect(DB_NAME)
+    conn = _connect()
     df = pd.read_sql_query("SELECT * FROM results", conn)
     conn.close()
     return df
@@ -82,7 +89,7 @@ def get_all_results():
 
 def get_results_by_dataset(dataset_id):
     """按数据集 ID 查询检测结果"""
-    conn = sqlite3.connect(DB_NAME)
+    conn = _connect()
     df = pd.read_sql_query("SELECT * FROM results WHERE dataset_id = ?", conn, params=(dataset_id,))
     conn.close()
     return df
@@ -90,7 +97,7 @@ def get_results_by_dataset(dataset_id):
 
 def get_dataset_ids():
     """列出所有已扫描过的数据集 ID"""
-    conn = sqlite3.connect(DB_NAME)
+    conn = _connect()
     c = conn.cursor()
     c.execute("SELECT DISTINCT dataset_id FROM results WHERE dataset_id IS NOT NULL ORDER BY dataset_id")
     ids = [row[0] for row in c.fetchall()]

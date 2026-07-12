@@ -27,31 +27,65 @@ def get_local_whisper_model(model_name="base"):
     return _local_model
 
 
+def _trim_overlap(prev: str, curr: str, min_match: int = 2, max_window: int = 60) -> str:
+    """去除相邻分片重叠导致的重复内容。
+
+    在 prev 末尾与 curr 开头的窗口内，寻找既是 prev 后缀又是 curr 前缀的最长公共子串，
+    并从 curr 头部裁掉。用 difflib 而非严格相等，容忍两次转写在重叠区的小差异。
+    """
+    if not prev or not curr:
+        return curr
+    from difflib import SequenceMatcher
+    prev_tail = prev[-max_window:]
+    curr_head = curr[:max_window]
+    sm = SequenceMatcher(None, prev_tail, curr_head, autojunk=False)
+    best = 0
+    for a, b, size in sm.get_matching_blocks():
+        # 匹配块必须正好落在 prev_tail 的末尾、curr_head 的开头
+        if b == 0 and a + size == len(prev_tail) and size > best:
+            best = size
+    return curr[best:] if best >= min_match else curr
+
+
 def transcribe_audio_local(audio_path: str, model_name="base", initial_prompt: str = None,
                            progress_callback=None) -> str:
     model = get_local_whisper_model(model_name)
 
+    # 关键防幻觉参数：关闭“以上文为条件”可避免静音/收尾段陷入重复循环；
+    # no_speech_threshold + hallucination_silence_threshold 让静音尾段被快速跳过，
+    # 这正是过去“卡在 97%（最后一段不动）”的根因。
+    transcribe_kwargs = dict(
+        initial_prompt=initial_prompt,
+        language="zh",
+        condition_on_previous_text=False,
+        no_speech_threshold=0.6,
+        hallucination_silence_threshold=2.0,
+        verbose=False,
+        fp16=False,
+    )
+
     if progress_callback is None:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            result = model.transcribe(
-                audio_path, initial_prompt=initial_prompt, language="zh")
+            result = model.transcribe(audio_path, **transcribe_kwargs)
         return result["text"]
 
-    # Progress-enabled path: split audio by clip_timestamps and process each segment
+    # 进度版：只加载一次音频，再切成 numpy 片段逐段转写。
+    # 旧实现每段都传 audio_path + clip_timestamps，导致每段都重新 ffmpeg 解码整段音频
+    # 并重建完整 mel —— 越靠后越慢，且尾段静音极易触发幻觉重试循环。
     audio = whisper.load_audio(audio_path)
-    duration = len(audio) / whisper.audio.SAMPLE_RATE
+    sr = whisper.audio.SAMPLE_RATE
+    duration = len(audio) / sr
 
     if duration <= 32:
         progress_callback(0.0)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            result = model.transcribe(
-                audio_path, initial_prompt=initial_prompt, language="zh")
+            result = model.transcribe(audio, **transcribe_kwargs)
         progress_callback(1.0)
         return result["text"]
 
-    # Multi-segment: 30s chunks with 1s overlap to prevent word boundary cuts
+    # 30s 分片，1s 重叠防止字符边界被切断
     segment_len = 30
     overlap = 1
     segments = []
@@ -68,29 +102,18 @@ def transcribe_audio_local(audio_path: str, model_name="base", initial_prompt: s
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         for i, (seg_start, seg_end) in enumerate(segments):
-            result = model.transcribe(
-                audio_path,
-                initial_prompt=initial_prompt,
-                language="zh",
-                clip_timestamps=[seg_start, seg_end],
-                verbose=False,
-                fp16=False,
-            )
-            texts.append(result["text"])
+            start_sample = int(seg_start * sr)
+            end_sample = int(seg_end * sr)
+            # 直接传 numpy 切片：whisper.transcribe 接受 ndarray，只对本段建 mel，不重复解码
+            chunk = audio[start_sample:end_sample]
+            result = model.transcribe(chunk, **transcribe_kwargs)
+            texts.append(result["text"].strip())
             progress_callback((i + 1) / len(segments))
 
-    # Deduplicate overlap at segment boundaries
     if len(texts) > 1:
         merged = [texts[0]]
-        for i in range(1, len(texts)):
-            prev = merged[-1]
-            curr = texts[i]
-            # Trim common prefix shared with previous segment's suffix
-            for k in range(min(len(prev), 40), 1, -1):
-                if curr.startswith(prev[-k:]):
-                    curr = curr[k:]
-                    break
-            merged.append(curr)
+        for curr in texts[1:]:
+            merged.append(_trim_overlap(merged[-1], curr))
         return "".join(merged)
 
     return texts[0] if texts else ""

@@ -28,7 +28,7 @@ def generate_poison(text: str, api_key: str, base_url: str, model: str) -> dict:
         base_url += '/v1'
     client = openai.OpenAI(api_key=api_key.strip(), base_url=base_url)
 
-    # 发送请求（带重试）
+    # 发送请求（带重试）：对所有 openai 异常统一重试，避免偶发网络抖动一次失败
     last_exc = None
     for attempt in range(3):
         try:
@@ -45,10 +45,12 @@ def generate_poison(text: str, api_key: str, base_url: str, model: str) -> dict:
             last_exc = None
             break
         except openai.APIError as e:
+            # APIError 是所有 openai 库异常的基类（含超时、连接、限流、服务端错误），统一重试
             last_exc = e
             if attempt < 2:
                 time.sleep(2 ** attempt)
         except Exception as e:
+            # 非网络/API 类异常（如参数错误）重试无意义，直接抛出
             raise ValueError(
                 f"❌ 请求异常。\n"
                 f"Base URL: {base_url}\n"
