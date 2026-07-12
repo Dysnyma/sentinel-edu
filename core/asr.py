@@ -6,6 +6,7 @@ import os
 import shutil
 import warnings
 from pathlib import Path
+from urllib.parse import urlparse
 
 # ----- 本地 Whisper 模型单例 -----
 _local_model = None
@@ -144,10 +145,19 @@ def extract_audio_from_video(video_path: str, ffmpeg_path='ffmpeg') -> str:
 
 
 def download_bilibili_video(url: str, bbdown_path='./BBDown') -> dict:
+    # URL 域名白名单校验：仅允许 bilibili.com 和 b23.tv（含子域名）
+    _ALLOWED_DOMAINS = {'bilibili.com', 'b23.tv'}
+    parsed = urlparse(url)
+    domain = parsed.netloc.lower()
+    if not domain or not any(domain == d or domain.endswith('.' + d) for d in _ALLOWED_DOMAINS):
+        raise ValueError(
+            f"不支持的链接：{url}。仅支持 bilibili.com 和 b23.tv 的链接。"
+        )
+
     downloads_dir = os.path.join(os.getcwd(), "downloads")
     os.makedirs(downloads_dir, exist_ok=True)
     cmd = [bbdown_path, url, '--work-dir', downloads_dir]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True)  # nosec — url 已通过上方白名单校验
     if result.returncode != 0:
         raise RuntimeError(f"BBDown 下载失败：{result.stderr}")
 
