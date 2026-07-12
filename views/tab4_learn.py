@@ -97,7 +97,9 @@ def render_tab4():
         if st.button("➕ 追加到敏感词库", type="primary"):
             added_count, new_words = apply_selected(selected)
             if added_count > 0:
-                st.success(f"已添加 {added_count} 个新词到 sensitive_words.txt")
+                # 重载 DFA Scanner 使新词立即生效，无需重启应用
+                DFAScanner('sensitive_words.txt').reload()
+                st.success(f"已添加 {added_count} 个新词到 sensitive_words.txt，词库已重载生效")
                 with st.expander("查看新增词汇"):
                     st.write(new_words)
                 # 清理 session 状态以便重新分析

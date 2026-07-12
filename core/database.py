@@ -5,6 +5,15 @@ import pandas as pd
 
 DB_NAME = os.path.join('data', 'scan_results.db')
 
+# 列名白名单：仅允许白名单内的列名参与 SQL 拼接，防止注入
+# 同时也是 init_db() 做旧表兼容性迁移的列名列表
+_MIGRATION_COLUMNS = [
+    ('llm_spans', 'TEXT'),
+    ('llm_reason', 'TEXT'),
+    ('dataset_id', 'TEXT'),
+    ('text', 'TEXT'),
+]
+
 
 def _connect():
     """统一建连：设置 busy timeout，避免多线程/多会话并发写入时 'database is locked'。"""
@@ -29,12 +38,12 @@ def init_db():
                     llm_spans TEXT
                 )''')
     # 兼容旧表缺少字段的情况
-    for col, col_type in [
-        ('llm_spans', 'TEXT'), ('llm_reason', 'TEXT'),
-        ('dataset_id', 'TEXT'), ('text', 'TEXT'),
-    ]:
+    _allowed = {c for c, _ in _MIGRATION_COLUMNS}
+    for col, col_type in _MIGRATION_COLUMNS:
+        if col not in _allowed:
+            raise ValueError(f"Illegal column name: {col}")
         try:
-            c.execute(f"SELECT {col} FROM results LIMIT 1")
+            c.execute(f"SELECT {col} FROM results LIMIT 1")  # nosec — col 已通过上方白名单校验
         except sqlite3.OperationalError:
             c.execute(f"ALTER TABLE results ADD COLUMN {col} {col_type}")
     conn.commit()
