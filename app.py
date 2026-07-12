@@ -30,8 +30,10 @@ os.makedirs("downloads", exist_ok=True)
 # ---------- 侧边栏 ----------
 st.sidebar.header("⚙️ 全局配置")
 st.sidebar.subheader("大模型 API")
-api_key = st.sidebar.text_input("API Key", type="password", value=st.session_state.openai_api_key)
-base_url = st.sidebar.text_input("API Base URL", value=st.session_state.openai_base_url)
+api_key = st.sidebar.text_input(
+    "API Key", type="password", value=st.session_state.openai_api_key)
+base_url = st.sidebar.text_input(
+    "API Base URL", value=st.session_state.openai_base_url)
 llm_model = st.sidebar.text_input("LLM 模型", value=st.session_state.llm_model)
 col_save, col_clear = st.sidebar.columns(2)
 with col_save:
@@ -72,12 +74,16 @@ if use_local_whisper:
 st.sidebar.subheader("系统工具状态")
 ffmpeg_available = shutil.which(st.session_state.ffmpeg_path) is not None
 bbdown_available = shutil.which(st.session_state.bbdown_path) is not None
-st.sidebar.caption(f"{'✅' if ffmpeg_available else '❌'} FFmpeg: {'可用' if ffmpeg_available else '未找到'}")
-st.sidebar.caption(f"{'✅' if bbdown_available else '❌'} BBDown: {'可用' if bbdown_available else '未找到'}")
+st.sidebar.caption(
+    f"{'✅' if ffmpeg_available else '❌'} FFmpeg: {'可用' if ffmpeg_available else '未找到'}")
+st.sidebar.caption(
+    f"{'✅' if bbdown_available else '❌'} BBDown: {'可用' if bbdown_available else '未找到'}")
 
 with st.sidebar.expander("⚙️ 高级工具配置（可选）"):
-    new_ffmpeg = st.text_input("FFmpeg 自定义路径", value=st.session_state.ffmpeg_path)
-    new_bbdown = st.text_input("BBDown 自定义路径", value=st.session_state.bbdown_path)
+    new_ffmpeg = st.text_input(
+        "FFmpeg 自定义路径", value=st.session_state.ffmpeg_path)
+    new_bbdown = st.text_input(
+        "BBDown 自定义路径", value=st.session_state.bbdown_path)
     if new_ffmpeg != st.session_state.ffmpeg_path:
         st.session_state.ffmpeg_path = new_ffmpeg
     if new_bbdown != st.session_state.bbdown_path:
@@ -96,7 +102,8 @@ st.session_state.openai_api_key = api_key.strip()
 st.session_state.openai_base_url = base_url
 st.session_state.llm_model = llm_model.strip()
 _last_saved = st.session_state.get('_last_saved_config', {})
-_current = {'openai_api_key': api_key, 'openai_base_url': base_url, 'llm_model': llm_model}
+_current = {'openai_api_key': api_key,
+            'openai_base_url': base_url, 'llm_model': llm_model}
 if _current != _last_saved:
     save_config_to_file()
     st.session_state['_last_saved_config'] = _current
