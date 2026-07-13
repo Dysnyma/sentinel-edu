@@ -58,8 +58,8 @@ def save_dataset(jsonl_path, title, api_key=None, base_url=None, model=None):
     if api_key and base_url and model and title is None:
         try:
             title = _generate_dataset_title(jsonl_path, api_key, base_url, model)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] AI 标题生成失败: {e}")
     if not title:
         title = '测试集'
 
@@ -141,8 +141,8 @@ def list_datasets():
             try:
                 with open(meta_path, 'r', encoding='utf-8') as mf:
                     meta = json.load(mf)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[WARN] 元数据文件解析失败 {meta_path}: {e}")
         datasets.append({
             'path': str(f),
             'name': f.stem,
