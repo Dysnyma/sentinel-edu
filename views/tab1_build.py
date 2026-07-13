@@ -65,8 +65,9 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
                         with st.spinner(f"正在加载 Whisper {local_whisper_model} 模型到内存..."):
                             get_local_whisper_model(local_whisper_model)
                         progress_bar = st.progress(0, text="正在语音转写... 0%")
+
                         def _update(pct):
-                            progress_bar.progress(pct, text=f"正在语音转写... {pct*100:.0f}%")
+                            progress_bar.progress(pct, text=f"正在语音转写... {pct * 100:.0f}%")
                         transcript = transcribe_audio_local(
                             audio_path, model_name=local_whisper_model, initial_prompt=prompt_text,
                             progress_callback=_update)
@@ -127,8 +128,9 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
                                 with st.spinner(f"正在加载 Whisper {local_whisper_model} 模型到内存..."):
                                     get_local_whisper_model(local_whisper_model)
                                 progress_bar = st.progress(0, text="正在语音转写... 0%")
+
                                 def _update2(pct):
-                                    progress_bar.progress(pct, text=f"正在语音转写... {pct*100:.0f}%")
+                                    progress_bar.progress(pct, text=f"正在语音转写... {pct * 100:.0f}%")
                                 transcript = transcribe_audio_local(
                                     audio_path, model_name=local_whisper_model, initial_prompt=prompt_text,
                                     progress_callback=_update2)
@@ -190,7 +192,7 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
                 eta = (elapsed / (i + 1)) * (total - i - 1) if i > 0 else 0
                 progress_bar.progress(
                     (i + 1) / total,
-                    text=f"文本纠错中... {i+1}/{total} | 耗时 {elapsed:.0f}s | 预计剩余 {eta:.0f}s"
+                    text=f"文本纠错中... {i + 1}/{total} | 耗时 {elapsed:.0f}s | 预计剩余 {eta:.0f}s"
                 )
             st.session_state['corrected_texts'] = corrected
             st.success(f"纠错完成，共 {total} 条，耗时 {time.time() - t_start:.0f}s")
@@ -269,7 +271,7 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
                     ai_title = _generate_dataset_title(
                         'data/final_test_mixed.jsonl', api_key, base_url, llm_model)
                 except Exception:
-                    pass
+                    st.warning("AI 标题建议失败，将使用默认名称")
             st.session_state['_ai_suggested_title'] = ai_title or '测试集'
 
             st.success(
@@ -304,7 +306,7 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
                         toxic_text = rec.get('text', '')
                         spans = rec.get('toxic_spans', [])
                         strategy = rec.get('attack_strategy', '未知')
-                        st.markdown(f"**样本 {i+1}** | 策略：{strategy}")
+                        st.markdown(f"**样本 {i + 1}** | 策略：{strategy}")
                         col1, col2 = st.columns(2)
                         with col1:
                             st.caption("原文")

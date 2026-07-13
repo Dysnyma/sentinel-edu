@@ -1,9 +1,7 @@
 import openai
 import whisper
 import subprocess
-import tempfile
 import os
-import shutil
 import warnings
 from pathlib import Path
 from urllib.parse import urlparse

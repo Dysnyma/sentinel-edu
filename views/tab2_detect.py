@@ -2,12 +2,11 @@
 
 import streamlit as st
 import os
-import pandas as pd
 from pathlib import Path
 
 from core.dfa_scanner import DFAScanner
 from core.llm_scanner import llm_scan
-from core.database import init_db, save_result, get_all_results, update_llm_result, get_results_by_dataset
+from core.database import init_db, save_result, get_all_results, update_llm_result
 from core.config import save_session_state
 from core.utils import load_jsonl, list_datasets, delete_dataset
 from views.helpers import (
@@ -28,7 +27,7 @@ def _init_db_records(all_data, dataset_id):
             save_result(rec['id'], true_label, -1, -1, [], 0, 0, [],
                         dataset_id=dataset_id, text=rec.get('text', ''))
         except Exception:
-            pass
+            st.warning(f"样本 {rec['id']} 初始记录写入失败")
 
 
 def _dfa_scan_all(all_data, dataset_id, progress_placeholder=None):
@@ -52,7 +51,7 @@ def _dfa_scan_all(all_data, dataset_id, progress_placeholder=None):
             eta = (elapsed / (i + 1)) * (total - i - 1) if i > 0 else 0
             progress_placeholder.progress(
                 (i + 1) / total,
-                text=f"一防 DFA 扫描中... {i+1}/{total} | 耗时 {elapsed:.0f}s | 预计剩余 {eta:.0f}s"
+                text=f"一防 DFA 扫描中... {i + 1}/{total} | 耗时 {elapsed:.0f}s | 预计剩余 {eta:.0f}s"
             )
     return results
 
@@ -308,7 +307,7 @@ def _render_detail_view(df_all, all_data):
                 llm_hits = {t for t in true_set if t in llm_spans}
                 remaining_llm = true_set - llm_hits
                 for t in remaining_llm:
-                    if any(t in l for l in llm_spans) or any(l in t for l in llm_spans):
+                    if any(t in span for span in llm_spans) or any(span in t for span in llm_spans):
                         llm_hits.add(t)
                 llm_miss = true_set - llm_hits
                 llm_extra = llm_set - true_set
@@ -337,14 +336,13 @@ def _render_inline_detect(api_ready, api_key, base_url, llm_model):
             dfa_hit, dfa_words = scanner.scan(inline_text)
 
         # LLM 全量扫描（DFA 命中≠有毒，由 LLM 结合上下文做最终判定）
-        llm_pred, llm_spans, llm_time, llm_reason = -1, [], 0, ''
+        llm_pred, llm_spans, llm_reason = -1, [], ''
         if api_ready:
             with st.spinner("二防 LLM 语义分析中..."):
                 try:
                     result = llm_scan(inline_text, api_key, base_url, llm_model, dfa_words)
                     llm_pred = int(result.get('is_toxic', False))
                     llm_spans = result.get('toxic_spans', [])
-                    llm_time = result.get('time_cost', 0)
                     if llm_pred == 1:
                         category = result.get('category', '隐性偏颇')
                         llm_reason = f"[{category}]：{result.get('reason', '')}"
@@ -478,7 +476,7 @@ def render_tab2(api_ready, api_key, base_url, llm_model, concurrency):
         if st.button("🤖 仅 LLM 扫描", disabled=not api_ready, width='stretch'):
             df = get_all_results()
             pre_scan = {row['text_id']: safe_json_loads(row['hit_words'])
-                       for _, row in df[df['text_id'].isin(current_ids)].iterrows()}
+                        for _, row in df[df['text_id'].isin(current_ids)].iterrows()}
             progress_bar = st.progress(0)
             tasks = [(llm_scan, (rec['text'], api_key, base_url, llm_model, pre_scan.get(rec['id'])))
                      for rec in all_data]
@@ -512,7 +510,7 @@ def render_tab2(api_ready, api_key, base_url, llm_model, concurrency):
     if not df_all.empty:
         csv = df_all.to_csv(index=False)
         st.download_button("📥 导出 CSV", data=csv,
-                           file_name=f"{dataset_id.replace('.jsonl','')}_results.csv",
+                           file_name=f"{dataset_id.replace('.jsonl', '')}_results.csv",
                            mime="text/csv")
 
     _render_batch_highlight(df_all, all_data)

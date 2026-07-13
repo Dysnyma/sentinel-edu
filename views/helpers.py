@@ -100,7 +100,6 @@ def to_native(v):
 
 def safe_json_loads(value):
     """安全解析 JSON 字符串，处理 pandas NaT/NaN/None 情况"""
-    import pandas as pd
     if value is None:
         return []
     if isinstance(value, float):

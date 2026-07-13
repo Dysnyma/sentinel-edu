@@ -2,7 +2,6 @@
 import streamlit as st
 import os
 import shutil
-from pathlib import Path
 
 from core.config import init_config, save_config_to_file, CONFIG_FILE, load_session_state
 from core.database import init_db

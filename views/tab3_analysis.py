@@ -4,10 +4,8 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import io
 import os
-import json
 
 from core.database import get_all_results, get_results_by_dataset, get_dataset_ids
 from core.utils import load_jsonl
@@ -272,7 +270,7 @@ def render_tab3():
     with pd.ExcelWriter(buf, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='扫描结果')
     st.download_button("📥 导出 Excel", data=buf.getvalue(),
-                       file_name=f"{dataset_id.replace('.jsonl','') if dataset_id else 'scan'}_results.xlsx",
+                       file_name=f"{dataset_id.replace('.jsonl', '') if dataset_id else 'scan'}_results.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     with st.expander("查看完整数据库记录"):
