@@ -66,7 +66,10 @@ def llm_scan(text: str, api_key: str, base_url: str, model: str, dfa_words: list
         if isinstance(resp, str):
             raise ValueError(f"API 返回了字符串而非标准响应对象（可能 base_url 指向了网页地址）。内容预览: {resp[:200]}")
         if not hasattr(resp, 'choices'):
-            raise ValueError(f"API 返回异常类型 {type(resp).__name__}，缺少 choices 字段")
+            raise ValueError(
+                f"API 返回异常：model={model}, base_url={base_url}, "
+                f"响应类型={type(resp).__name__}，缺少 choices 字段"
+            )
         content = resp.choices[0].message.content
         if content is None:
             raise ValueError("API 返回内容为空")

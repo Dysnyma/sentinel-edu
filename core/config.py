@@ -1,6 +1,9 @@
 import streamlit as st
 import json
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 CONFIG_FILE = os.path.join('data', 'apiconfig.json')
 
@@ -25,8 +28,10 @@ def load_config_from_file():
             for key, value in config.items():
                 if value:  # 文件中非空的值才覆盖
                     st.session_state[key] = value
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError:
             pass
+        except OSError as e:
+            logger.warning("读取配置文件失败: %s", e)
 
 
 def init_config():
@@ -63,8 +68,8 @@ def save_session_state():
     try:
         with open(SESSION_STATE_FILE, 'w', encoding='utf-8') as f:
             json.dump(payload, f, ensure_ascii=False)
-    except OSError:
-        pass
+    except OSError as e:
+        logger.warning("保存会话状态失败: %s", e)
 
 
 def load_session_state():
@@ -78,5 +83,7 @@ def load_session_state():
             if k == '_tab2_current_ids' and isinstance(v, list):
                 v = set(v)
             st.session_state[k] = v
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError:
         pass
+    except OSError as e:
+        logger.warning("恢复会话状态失败: %s", e)

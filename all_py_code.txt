@@ -1,0 +1,2774 @@
+========================================
+ Sentinel Edu — 全部 Python 源码合并
+ 生成时间: 2026-07-18 15:41:39
+ 文件总数: 17
+========================================
+
+========================================
+ 文件: app.py
+ 路径: /home/ckc/projects/sentinel-edu/app.py
+ 行数: 129
+========================================
+
+"""Sentinel-Edu — 课堂思政元素安全性分析原型系统"""
+import streamlit as st
+import os
+import shutil
+
+from core.config import init_config, save_config_to_file, CONFIG_FILE, load_session_state
+from core.database import init_db
+from core.asr import is_whisper_model_downloaded
+from views.helpers import check_api_connection
+from views.tab1_build import render_tab1
+from views.tab2_detect import render_tab2
+from views.tab3_analysis import render_tab3
+from views.tab4_learn import render_tab4
+
+# ---------- 页面配置 ----------
+st.set_page_config(
+    page_title="思政课堂安全分析原型",
+    layout="wide",
+    menu_items={'Get help': None, 'Report a bug': None, 'About': None}
+)
+
+# ---------- 初始化 ----------
+init_config()
+load_session_state()
+init_db()
+os.makedirs("data", exist_ok=True)
+os.makedirs("downloads", exist_ok=True)
+
+# ---------- 侧边栏 ----------
+st.sidebar.header("⚙️ 全局配置")
+st.sidebar.subheader("大模型 API")
+api_key = st.sidebar.text_input(
+    "API Key", type="password", value=st.session_state.openai_api_key)
+base_url = st.sidebar.text_input(
+    "API Base URL", value=st.session_state.openai_base_url)
+llm_model = st.sidebar.text_input("LLM 模型", value=st.session_state.llm_model)
+col_save, col_clear = st.sidebar.columns(2)
+with col_save:
+    if st.button("💾 保存配置"):
+        save_config_to_file()
+        st.success("配置已保存")
+with col_clear:
+    if st.button("🗑️ 清除保存"):
+        try:
+            os.remove(CONFIG_FILE)
+            st.success("已清除")
+        except OSError:
+            pass
+if st.sidebar.button("🔍 测试连接"):
+    ok, msg = check_api_connection(api_key, base_url, llm_model)
+    if ok:
+        st.sidebar.success(msg)
+    else:
+        st.sidebar.error(msg)
+
+st.sidebar.caption("若无 API Key，大模型功能不可用。")
+
+# 语音识别设置
+st.sidebar.subheader("语音识别 (ASR)")
+use_local_whisper = st.sidebar.checkbox("使用本地 Whisper 模型（免费，离线）", value=True)
+local_whisper_model = None
+if use_local_whisper:
+    local_whisper_model = st.sidebar.selectbox(
+        "模型大小", ["tiny", "base", "small", "medium", "large"],
+        index=2, help="越大越准确，但更慢更占内存。推荐 small 或 medium。"
+    )
+    if is_whisper_model_downloaded(local_whisper_model):
+        st.sidebar.caption(f"✅ Whisper {local_whisper_model} 模型已下载")
+    else:
+        st.sidebar.caption(f"📥 Whisper {local_whisper_model} 模型未下载，首次使用时将自动下载")
+
+# 工具状态
+st.sidebar.subheader("系统工具状态")
+ffmpeg_available = shutil.which(st.session_state.ffmpeg_path) is not None
+bbdown_available = shutil.which(st.session_state.bbdown_path) is not None
+st.sidebar.caption(
+    f"{'✅' if ffmpeg_available else '❌'} FFmpeg: {'可用' if ffmpeg_available else '未找到'}")
+st.sidebar.caption(
+    f"{'✅' if bbdown_available else '❌'} BBDown: {'可用' if bbdown_available else '未找到'}")
+
+with st.sidebar.expander("⚙️ 高级工具配置（可选）"):
+    new_ffmpeg = st.text_input(
+        "FFmpeg 自定义路径", value=st.session_state.ffmpeg_path)
+    new_bbdown = st.text_input(
+        "BBDown 自定义路径", value=st.session_state.bbdown_path)
+    if new_ffmpeg != st.session_state.ffmpeg_path:
+        st.session_state.ffmpeg_path = new_ffmpeg
+    if new_bbdown != st.session_state.bbdown_path:
+        st.session_state.bbdown_path = new_bbdown
+
+concurrency = st.sidebar.slider("并发请求数（加速生成/检测）", 1, 6, 3,
+                                help="同时调用大模型的数量，提高速度但可能触发限流。")
+
+# 规范化 base_url：补全 /v1 后缀
+base_url = base_url.strip().rstrip('/')
+if base_url and not base_url.endswith('/v1'):
+    base_url += '/v1'
+
+# 更新 session_state，仅在变化时自动保存
+st.session_state.openai_api_key = api_key.strip()
+st.session_state.openai_base_url = base_url
+st.session_state.llm_model = llm_model.strip()
+_last_saved = st.session_state.get('_last_saved_config', {})
+_current = {'openai_api_key': api_key,
+            'openai_base_url': base_url, 'llm_model': llm_model}
+if _current != _last_saved:
+    save_config_to_file()
+    st.session_state['_last_saved_config'] = _current
+
+api_ready = bool(api_key) and bool(base_url) and bool(llm_model)
+
+# ---------- 主界面 ----------
+st.title("🛡️ 课堂思政元素安全性分析原型系统")
+st.markdown("---")
+
+tab1, tab2, tab3, tab4 = st.tabs(["📦 测试集构建", "🔍 安全检测", "📊 可视化分析", "🧠 自学习优化"])
+
+with tab1:
+    render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
+                use_local_whisper, local_whisper_model)
+
+with tab2:
+    render_tab2(api_ready, api_key, base_url, llm_model, concurrency)
+
+with tab3:
+    render_tab3()
+
+with tab4:
+    render_tab4()
+
+
+========================================
+ 文件: core/__init__.py
+ 路径: /home/ckc/projects/sentinel-edu/core/__init__.py
+ 行数: 2
+========================================
+
+# Sentinel-Edu 核心模块
+# 课堂思政元素安全性分析原型系统
+
+
+========================================
+ 文件: core/asr.py
+ 路径: /home/ckc/projects/sentinel-edu/core/asr.py
+ 行数: 170
+========================================
+
+import openai
+import whisper
+import subprocess
+import os
+import warnings
+from pathlib import Path
+from urllib.parse import urlparse
+
+# ----- 本地 Whisper 模型单例 -----
+_local_model = None
+_local_model_name = "base"
+
+
+def is_whisper_model_downloaded(model_name="base"):
+    """检查 Whisper 模型是否已下载到本地缓存"""
+    cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "whisper")
+    model_file = os.path.join(cache_dir, f"{model_name}.pt")
+    return os.path.exists(model_file)
+
+
+def get_local_whisper_model(model_name="base"):
+    global _local_model, _local_model_name
+    if _local_model is None or _local_model_name != model_name:
+        _local_model = whisper.load_model(model_name)
+        _local_model_name = model_name
+    return _local_model
+
+
+def _trim_overlap(prev: str, curr: str, min_match: int = 2, max_window: int = 60) -> str:
+    """去除相邻分片重叠导致的重复内容。
+
+    在 prev 末尾与 curr 开头的窗口内，寻找既是 prev 后缀又是 curr 前缀的最长公共子串，
+    并从 curr 头部裁掉。用 difflib 而非严格相等，容忍两次转写在重叠区的小差异。
+    """
+    if not prev or not curr:
+        return curr
+    from difflib import SequenceMatcher
+    prev_tail = prev[-max_window:]
+    curr_head = curr[:max_window]
+    sm = SequenceMatcher(None, prev_tail, curr_head, autojunk=False)
+    best = 0
+    for a, b, size in sm.get_matching_blocks():
+        # 匹配块必须正好落在 prev_tail 的末尾、curr_head 的开头
+        if b == 0 and a + size == len(prev_tail) and size > best:
+            best = size
+    return curr[best:] if best >= min_match else curr
+
+
+def transcribe_audio_local(audio_path: str, model_name="base", initial_prompt: str = None,
+                           progress_callback=None) -> str:
+    model = get_local_whisper_model(model_name)
+
+    # 关键防幻觉参数：关闭“以上文为条件”可避免静音/收尾段陷入重复循环；
+    # no_speech_threshold + hallucination_silence_threshold 让静音尾段被快速跳过，
+    # 这正是过去“卡在 97%（最后一段不动）”的根因。
+    transcribe_kwargs = dict(
+        initial_prompt=initial_prompt,
+        language="zh",
+        condition_on_previous_text=False,
+        no_speech_threshold=0.6,
+        hallucination_silence_threshold=2.0,
+        verbose=False,
+        fp16=False,
+    )
+
+    if progress_callback is None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = model.transcribe(audio_path, **transcribe_kwargs)
+        return result["text"]
+
+    # 进度版：只加载一次音频，再切成 numpy 片段逐段转写。
+    # 旧实现每段都传 audio_path + clip_timestamps，导致每段都重新 ffmpeg 解码整段音频
+    # 并重建完整 mel —— 越靠后越慢，且尾段静音极易触发幻觉重试循环。
+    audio = whisper.load_audio(audio_path)
+    sr = whisper.audio.SAMPLE_RATE
+    duration = len(audio) / sr
+
+    if duration <= 32:
+        progress_callback(0.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = model.transcribe(audio, **transcribe_kwargs)
+        progress_callback(1.0)
+        return result["text"]
+
+    # 30s 分片，1s 重叠防止字符边界被切断
+    segment_len = 30
+    overlap = 1
+    segments = []
+    pos = 0.0
+    while pos < duration:
+        end = min(pos + segment_len, duration)
+        segments.append((pos, end))
+        if end >= duration:
+            break
+        pos = end - overlap
+
+    progress_callback(0.0)
+    texts = []
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for i, (seg_start, seg_end) in enumerate(segments):
+            start_sample = int(seg_start * sr)
+            end_sample = int(seg_end * sr)
+            # 直接传 numpy 切片：whisper.transcribe 接受 ndarray，只对本段建 mel，不重复解码
+            chunk = audio[start_sample:end_sample]
+            result = model.transcribe(chunk, **transcribe_kwargs)
+            texts.append(result["text"].strip())
+            progress_callback((i + 1) / len(segments))
+
+    if len(texts) > 1:
+        merged = [texts[0]]
+        for curr in texts[1:]:
+            merged.append(_trim_overlap(merged[-1], curr))
+        return "".join(merged)
+
+    return texts[0] if texts else ""
+
+
+def transcribe_audio_api(audio_path: str, api_key: str, base_url: str, prompt: str = None) -> str:
+    client = openai.OpenAI(api_key=api_key, base_url=base_url)
+    with open(audio_path, 'rb') as f:
+        transcription = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=f,
+            prompt=prompt
+        )
+    return transcription.text
+
+
+def extract_audio_from_video(video_path: str, ffmpeg_path='ffmpeg') -> str:
+    downloads_dir = os.path.join(os.getcwd(), "downloads")
+    os.makedirs(downloads_dir, exist_ok=True)
+    audio_name = Path(video_path).stem + "_extracted.wav"
+    audio_path = os.path.join(downloads_dir, audio_name)
+    cmd = [ffmpeg_path, '-i', video_path, '-vn', '-acodec',
+           'pcm_s16le', '-ar', '16000', '-ac', '1', audio_path, '-y']
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg 音频提取失败：{result.stderr}")
+    return audio_path
+
+
+def download_bilibili_video(url: str, bbdown_path='./BBDown') -> dict:
+    # URL 域名白名单校验：仅允许 bilibili.com 和 b23.tv（含子域名）
+    _ALLOWED_DOMAINS = {'bilibili.com', 'b23.tv'}
+    parsed = urlparse(url)
+    domain = parsed.netloc.lower()
+    if not domain or not any(domain == d or domain.endswith('.' + d) for d in _ALLOWED_DOMAINS):
+        raise ValueError(
+            f"不支持的链接：{url}。仅支持 bilibili.com 和 b23.tv 的链接。"
+        )
+
+    downloads_dir = os.path.join(os.getcwd(), "downloads")
+    os.makedirs(downloads_dir, exist_ok=True)
+    cmd = [bbdown_path, url, '--work-dir', downloads_dir]
+    result = subprocess.run(cmd, capture_output=True, text=True)  # nosec — url 已通过上方白名单校验
+    if result.returncode != 0:
+        raise RuntimeError(f"BBDown 下载失败：{result.stderr}")
+
+    video_file = None
+    subtitle_file = None
+    for f in Path(downloads_dir).rglob('*'):
+        if f.suffix in ['.mp4', '.flv', '.mkv'] and video_file is None:
+            video_file = str(f)
+        elif f.suffix in ['.cc', '.srt', '.ass', '.vtt'] and subtitle_file is None:
+            subtitle_file = str(f)
+
+    return {'video': video_file, 'subtitle': subtitle_file}
+
+
+========================================
+ 文件: core/config.py
+ 路径: /home/ckc/projects/sentinel-edu/core/config.py
+ 行数: 82
+========================================
+
+import streamlit as st
+import json
+import os
+
+CONFIG_FILE = os.path.join('data', 'apiconfig.json')
+
+
+def save_config_to_file():
+    config = {
+        'openai_api_key': st.session_state.get('openai_api_key', ''),
+        'openai_base_url': st.session_state.get('openai_base_url', ''),
+        'llm_model': st.session_state.get('llm_model', ''),
+    }
+    os.makedirs('data', exist_ok=True)
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(config, f, ensure_ascii=False)
+
+
+def load_config_from_file():
+    """从文件加载配置，文件中有值的字段直接覆盖 session_state（含默认值）"""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            for key, value in config.items():
+                if value:  # 文件中非空的值才覆盖
+                    st.session_state[key] = value
+        except (json.JSONDecodeError, OSError):
+            pass
+
+
+def init_config():
+    defaults = {
+        'openai_api_key': '',
+        'openai_base_url': 'https://api.openai.com/v1',
+        'llm_model': 'gpt-3.5-turbo',
+        'bbdown_path': './BBDown',
+        'ffmpeg_path': 'ffmpeg',
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+    # 尝试从文件加载（仅在首次初始化时覆盖空值）
+    load_config_from_file()
+
+
+# ---- 会话状态持久化 ----
+
+SESSION_STATE_FILE = os.path.join('data', 'session_state.json')
+_SESSION_KEYS = ['_current_dataset_id', '_tab2_current_ids', 'last_dataset_title']
+
+
+def save_session_state():
+    """将关键 session_state 键写入磁盘，使重启后能恢复"""
+    os.makedirs('data', exist_ok=True)
+    payload = {}
+    for k in _SESSION_KEYS:
+        v = st.session_state.get(k)
+        if v is not None:
+            if isinstance(v, set):
+                v = list(v)
+            payload[k] = v
+    try:
+        with open(SESSION_STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def load_session_state():
+    """从磁盘恢复关键 session_state 键"""
+    if not os.path.exists(SESSION_STATE_FILE):
+        return
+    try:
+        with open(SESSION_STATE_FILE, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+        for k, v in payload.items():
+            if k == '_tab2_current_ids' and isinstance(v, list):
+                v = set(v)
+            st.session_state[k] = v
+    except (json.JSONDecodeError, OSError):
+        pass
+
+
+========================================
+ 文件: core/database.py
+ 路径: /home/ckc/projects/sentinel-edu/core/database.py
+ 行数: 114
+========================================
+
+import sqlite3
+import json
+import os
+import pandas as pd
+
+DB_NAME = os.path.join('data', 'scan_results.db')
+
+# 列名白名单：仅允许白名单内的列名参与 SQL 拼接，防止注入
+# 同时也是 init_db() 做旧表兼容性迁移的列名列表
+_MIGRATION_COLUMNS = [
+    ('llm_spans', 'TEXT'),
+    ('llm_reason', 'TEXT'),
+    ('dataset_id', 'TEXT'),
+    ('text', 'TEXT'),
+]
+
+
+def _connect():
+    """统一建连：设置 busy timeout，避免多线程/多会话并发写入时 'database is locked'。"""
+    conn = sqlite3.connect(DB_NAME, timeout=30)
+    conn.execute('PRAGMA journal_mode=WAL')  # WAL 模式允许读写并发，显著降低锁冲突
+    return conn
+
+
+def init_db():
+    os.makedirs('data', exist_ok=True)
+    conn = _connect()
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text_id TEXT UNIQUE,
+                    true_label INTEGER,
+                    dfa_pred INTEGER,
+                    llm_pred INTEGER,
+                    hit_words TEXT,
+                    dfa_time REAL,
+                    llm_time REAL,
+                    llm_spans TEXT
+                )''')
+    # 兼容旧表缺少字段的情况
+    _allowed = {c for c, _ in _MIGRATION_COLUMNS}
+    for col, col_type in _MIGRATION_COLUMNS:
+        if col not in _allowed:
+            raise ValueError(f"Illegal column name: {col}")
+        try:
+            c.execute(f"SELECT {col} FROM results LIMIT 1")  # nosec — col 已通过上方白名单校验
+        except sqlite3.OperationalError:
+            c.execute(f"ALTER TABLE results ADD COLUMN {col} {col_type}")
+    conn.commit()
+    conn.close()
+
+
+def save_result(text_id, true_label, dfa_pred, llm_pred, hit_words, dfa_time, llm_time,
+                llm_spans=None, llm_reason=None, dataset_id=None, text=None):
+    """保存检测结果。已有的非默认值（非 -1 / 空字符串）会被保留。"""
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("SELECT dfa_pred, llm_pred, hit_words, llm_spans, llm_reason FROM results WHERE text_id = ?", (text_id,))
+    row = c.fetchone()
+    if row:
+        ex_dfa, ex_llm, ex_hw, ex_ls, ex_reason = row
+        final_dfa = dfa_pred if dfa_pred != -1 else ex_dfa
+        final_llm = llm_pred if llm_pred != -1 else ex_llm
+        final_hw = json.dumps(hit_words, ensure_ascii=False) if hit_words is not None else ex_hw
+        final_ls = json.dumps(llm_spans or [], ensure_ascii=False) if llm_spans is not None else ex_ls
+        final_reason = llm_reason if llm_reason is not None else ex_reason
+    else:
+        final_dfa = dfa_pred
+        final_llm = llm_pred
+        final_hw = json.dumps(hit_words, ensure_ascii=False)
+        final_ls = json.dumps(llm_spans or [], ensure_ascii=False)
+        final_reason = llm_reason or ''
+    c.execute('''INSERT OR REPLACE INTO results
+                 (text_id, true_label, dfa_pred, llm_pred, hit_words, dfa_time, llm_time,
+                  llm_spans, llm_reason, dataset_id, text)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+              (text_id, true_label, final_dfa, final_llm, final_hw, dfa_time, llm_time,
+               final_ls, final_reason or '', dataset_id, text))
+    conn.commit()
+    conn.close()
+
+
+def update_llm_result(text_id, llm_pred, llm_time, llm_spans=None, llm_reason=None):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute('''UPDATE results SET llm_pred = ?, llm_time = ?, llm_spans = ?, llm_reason = ? WHERE text_id = ?''',
+              (llm_pred, llm_time, json.dumps(llm_spans or [], ensure_ascii=False), llm_reason or '', text_id))
+    conn.commit()
+    conn.close()
+
+
+def get_all_results():
+    conn = _connect()
+    df = pd.read_sql_query("SELECT * FROM results", conn)
+    conn.close()
+    return df
+
+
+def get_results_by_dataset(dataset_id):
+    """按数据集 ID 查询检测结果"""
+    conn = _connect()
+    df = pd.read_sql_query("SELECT * FROM results WHERE dataset_id = ?", conn, params=(dataset_id,))
+    conn.close()
+    return df
+
+
+def get_dataset_ids():
+    """列出所有已扫描过的数据集 ID"""
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("SELECT DISTINCT dataset_id FROM results WHERE dataset_id IS NOT NULL ORDER BY dataset_id")
+    ids = [row[0] for row in c.fetchall()]
+    conn.close()
+    return ids
+
+
+========================================
+ 文件: core/dfa_scanner.py
+ 路径: /home/ckc/projects/sentinel-edu/core/dfa_scanner.py
+ 行数: 204
+========================================
+
+"""增强型 DFA 扫描器：AC 自动机 + 反混淆 + 拼音同音匹配 + 形近字映射 + 模糊兜底"""
+
+import ahocorasick
+import re
+import unicodedata
+
+
+# 常见形近/异体字符映射 → 规范字形
+_SIMILAR_CHARS = str.maketrans({
+    # 日/曰
+    '\u66f0': '\u65e5',  # 曰 → 日
+    # 已/己/巳
+    '\u5df3': '\u5df2',  # 巳 → 已
+    '\u5df1': '\u5df2',  # 己 → 已
+    # 入/人
+    '\u5165': '\u4eba',  # 入 → 人
+    # 干/千
+    '\u5e72': '\u5343',  # 干 → 千
+    # 土/士
+    '\u58eb': '\u571f',  # 士 → 土
+    # 未/末
+    '\u672b': '\u672a',  # 末 → 未
+    # 准/淮
+    '\u6dee': '\u51c6',  # 淮 → 准
+    # 侯/候
+    '\u5019': '\u4faf',  # 候 → 侯
+    # 博/傅/缚
+    # 申/甲/由
+    '\u7532': '\u7533',  # 甲 → 申
+    '\u7531': '\u7533',  # 由 → 申
+    # 天/夭
+    '\u592d': '\u5929',  # 夭 → 天
+    # 冶/治
+    '\u51b6': '\u6cbb',  # 冶 → 治
+    # 免/兔
+    '\u5154': '\u514d',  # 兔 → 免
+    # 梁/粱
+    '\u7cb1': '\u6881',  # 粱 → 梁
+    # 栗/粟
+    '\u7c9f': '\u6817',  # 粟 → 栗
+    # 辨/辩/辫
+    '\u8fa9': '\u8fa8',  # 辩 → 辨
+    '\u8fab': '\u8fa8',  # 辫 → 辨
+    # 裁/栽/载
+    '\u683d': '\u88c1',  # 栽 → 裁
+    '\u8f7d': '\u88c1',  # 载 → 裁
+    # 成/戊/戌/戍
+    '\u620a': '\u6210',  # 戊 → 成
+    '\u620c': '\u6210',  # 戌 → 成
+    '\u620e': '\u6210',  # 戍 → 成
+    # 风/凤
+    '\u51e4': '\u98ce',  # 凤 → 风
+    # 官/宫
+    '\u5bab': '\u5b98',  # 宫 → 官
+    # 历/厉
+    '\u5389': '\u5386',  # 厉 → 历
+    # 藉/籍
+    '\u7c4d': '\u85c9',  # 籍 → 藉
+    # 概/慨/溉
+    '\u6168': '\u6982',  # 慨 → 概
+    '\u6e89': '\u6982',  # 溉 → 概
+})
+
+
+class DFAScanner:
+    def __init__(self, words_file='sensitive_words.txt'):
+        self.words_file = words_file
+        # 原始关键词自动机
+        self.automaton = ahocorasick.Automaton()
+        # 拼音自动机（同音字绕过检测）
+        self.pinyin_automaton = ahocorasick.Automaton()
+        # 加载后用于模糊匹配的原词列表
+        self._words = []
+        self._load(words_file)
+        self.automaton.make_automaton()
+        self.pinyin_automaton.make_automaton()
+
+    def _load(self, file_path):
+        self._words = []
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for idx, line in enumerate(f):
+                word = line.strip()
+                if not word:
+                    continue
+                self._words.append(word)
+                self.automaton.add_word(word, (idx, word))
+                pinyin_str = self._word_to_pinyin(word)
+                self.pinyin_automaton.add_word(pinyin_str, (idx, word))
+
+    def reload(self):
+        """重新加载词库（用于自学习追加后刷新）"""
+        self.automaton = ahocorasick.Automaton()
+        self.pinyin_automaton = ahocorasick.Automaton()
+        self._load(self.words_file)
+        self.automaton.make_automaton()
+        self.pinyin_automaton.make_automaton()
+
+    # ---------- 反混淆预处理 ----------
+
+    @staticmethod
+    def _word_to_pinyin(word: str) -> str:
+        from pypinyin import pinyin, Style
+        return ''.join(p[0] for p in pinyin(word, style=Style.TONE3))
+
+    @staticmethod
+    def _text_to_pinyin(text: str) -> str:
+        from pypinyin import pinyin, Style
+        result = []
+        for item in pinyin(text, style=Style.TONE3):
+            result.append(item[0] if item else '')
+        return ''.join(result)
+
+    @staticmethod
+    def _normalize_similar_chars(text: str) -> str:
+        """形近字/异体字归一化：将易混淆字符替换为规范字形"""
+        return text.translate(_SIMILAR_CHARS)
+
+    @staticmethod
+    def _strip_separators(text: str) -> str:
+        """移除 CJK 字符之间的分隔符"""
+        pattern = re.compile(
+            r'(?<=[\u4e00-\u9fff\u3400-\u4dbf])'
+            r'[\s\.·\-_/,;:!?，。！？；：、·\u200b-\u200f\u00ad\ufeff\uff01-\uff5e\u3000]+'
+            r'(?=[\u4e00-\u9fff\u3400-\u4dbf])'
+        )
+        return pattern.sub('', text)
+
+    @staticmethod
+    def normalize(text: str) -> str:
+        """增强型文本归一化：NFKC + 形近字映射 + 去零宽字符 + 去标点"""
+        text = unicodedata.normalize('NFKC', text)
+        text = DFAScanner._normalize_similar_chars(text)
+        text = re.sub(r'[\u200b-\u200f\u00ad\ufeff\u2060]', '', text)
+        text = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', text)
+        return text.lower()
+
+    # ---------- 模糊匹配兜底 ----------
+
+    def _fuzzy_scan(self, text: str, threshold=90) -> list:
+        """当 AC 自动机未命中时，用编辑距离做模糊兜底"""
+        from rapidfuzz import fuzz
+        hits = []
+        normalized = self.normalize(text)
+        for word in self._words:
+            # 候选词至少3字且长度不超过文本
+            if len(word) < 3 or len(word) > len(normalized):
+                continue
+            score = fuzz.partial_ratio(word, normalized)
+            if score >= threshold:
+                hits.append(word)
+        return hits
+
+    # ---------- 扫描 ----------
+
+    def scan(self, text: str, fuzzy=True) -> tuple:
+        """
+        增强扫描管道：
+        1. 归一化文本（NFKC + 形近字映射）→ AC 自动机
+        2. 去分隔符 → AC 自动机（对抗 '资.本.主.义'）
+        3. 拼音文本 → 拼音自动机（对抗同音字）
+        4. 模糊匹配兜底（rapidfuzz, threshold=90）
+        返回 (是否命中, 命中词汇列表)
+        """
+        normalized = self.normalize(text)
+        stripped = self._strip_separators(normalized)
+        pinyin_text = self._text_to_pinyin(stripped)
+
+        hits = set()
+
+        for _, (_, word) in self.automaton.iter(normalized):
+            hits.add(word)
+
+        if stripped != normalized:
+            for _, (_, word) in self.automaton.iter(stripped):
+                hits.add(word)
+
+        for _, (_, word) in self.pinyin_automaton.iter(pinyin_text):
+            hits.add(word)
+
+        # 模糊匹配兜底（仅在 AC 全未命中时触发）
+        if not hits and fuzzy:
+            for word in self._fuzzy_scan(text):
+                hits.add(word)
+
+        hits = self._filter_false_positives(hits, normalized)
+
+        return bool(hits), list(hits)
+
+    # ---------- 误报过滤 ----------
+
+    @staticmethod
+    def _filter_false_positives(hits: set, text: str) -> set:
+        filtered = set()
+        number_chars = set('一二三四五六七八九十百千万亿第零0123456789')
+        for word in hits:
+            if word == '六四':
+                idx = text.find('六四')
+                if idx >= 0:
+                    before = text[idx - 1] if idx > 0 else ''
+                    after = text[idx + 2] if idx + 2 < len(text) else ''
+                    if before in number_chars or after in number_chars:
+                        continue
+            filtered.add(word)
+        return filtered
+
+
+========================================
+ 文件: core/llm_scanner.py
+ 路径: /home/ckc/projects/sentinel-edu/core/llm_scanner.py
+ 行数: 87
+========================================
+
+import openai
+import json_repair
+import re
+import time
+
+SCAN_PROMPT = """你是一个严格的教学内容安全审核专家。请对以下文本进行安全评估。
+
+{dfa_hint}
+
+请重点判断文本是否存在隐性价值观偏颇（历史虚无主义、消极躺平）、不当比喻（低俗网络梗解释严肃概念）等深层次问题。
+
+输出必须为严格的 JSON 字符串，包含以下字段：
+- "is_toxic": 布尔值，是否违规
+- "toxic_spans": 字符串列表，具体有毒片段（无毒则为空数组）
+- "category": 字符串，若违规，三选一："显性敏感词" / "隐性偏颇" / "不当比喻"；若安全则为空字符串
+- "reason": 字符串，若违规则一句话简述问题；若安全则简述为何判定为安全
+文本：{text}"""
+
+
+def llm_scan(text: str, api_key: str, base_url: str, model: str, dfa_words: list = None) -> dict:
+    base_url = base_url.strip().rstrip('/')
+    if not base_url.endswith('/v1'):
+        base_url += '/v1'
+
+    client = openai.OpenAI(api_key=api_key, base_url=base_url)
+    t_start = time.time()
+
+    if dfa_words:
+        dfa_hint = (
+            f"前置关键词扫描（DFA）命中了以下词汇：{dfa_words}。"
+            f" 重要提醒：这些词汇可能出现在否定句（如'我们不能...'）、"
+            f"反驳论证、引述、教学分析等正当语境中。"
+            f"请结合上下文仔细甄别，不要仅凭关键词出现就判定为违规。"
+        )
+    else:
+        dfa_hint = "前置关键词扫描（DFA）未发现敏感词，请重点检查是否存在隐性违规。"
+
+    def _call_api():
+        return client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "你是内容安全审核专家，只输出 JSON。"},
+                {"role": "user", "content": SCAN_PROMPT.replace('{dfa_hint}', dfa_hint).replace('{text}', text)}
+            ],
+            temperature=0.0,
+            max_tokens=512,
+            timeout=30
+        )
+
+    last_exc = None
+    for attempt in range(3):
+        try:
+            resp = _call_api()
+            last_exc = None
+            break
+        except (openai.APIStatusError, openai.APITimeoutError, openai.APIConnectionError) as e:
+            last_exc = e
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+
+    if last_exc:
+        raise ValueError(f"LLM 扫描 API 失败（重试3次后）: {last_exc}") from last_exc
+
+    try:
+        # 防御：兼容部分代理/网关直接返回字符串的情况
+        if isinstance(resp, str):
+            raise ValueError(f"API 返回了字符串而非标准响应对象（可能 base_url 指向了网页地址）。内容预览: {resp[:200]}")
+        if not hasattr(resp, 'choices'):
+            raise ValueError(f"API 返回异常类型 {type(resp).__name__}，缺少 choices 字段")
+        content = resp.choices[0].message.content
+        if content is None:
+            raise ValueError("API 返回内容为空")
+        content = content.strip()
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"LLM 扫描 API 失败: {e}") from e
+    content = re.sub(r'^```(?:json)?\s*', '', content)
+    content = re.sub(r'\s*```$', '', content)
+
+    try:
+        result = json_repair.loads(content)
+    except Exception:
+        raise ValueError(f"无法解析 LLM 返回的 JSON。\n{content[:300]}")
+
+    result['time_cost'] = time.time() - t_start
+    return result
+
+
+========================================
+ 文件: core/poison_generator.py
+ 路径: /home/ckc/projects/sentinel-edu/core/poison_generator.py
+ 行数: 113
+========================================
+
+import openai
+import json_repair
+import re
+import time
+
+POISON_PROMPT = """你现在是一个网络安全红队专家，负责为教学内容安全防火墙生成测试靶场语料。
+请接收一段真实的课堂教学文本，并在保持上下文流畅的前提下，将其改写为具有安全隐患的文本。
+你需要根据以下三种策略随机选择一种进行改写：
+1. 显性违规：植入政治/历史的明确违规变体。
+2. 隐性偏颇：不包含敏感词，但宣扬历史虚无主义、极端消极、躺平等不良价值观。
+3. 不当比喻：用低俗网络梗解释严肃概念。
+
+【强制输出格式】
+你必须且只能输出严格的 JSON 字符串，不要有任何多余的 Markdown 标记：
+{{
+"original_text": "原文本",
+"attack_strategy": "使用的策略名称",
+"text": "改写后的有毒文本",
+"toxic_spans": ["具体有毒的词汇或短语1", "具体有毒的词汇或短语2"],
+"is_toxic": true
+}}
+文本内容：{text}"""
+
+
+def generate_poison(text: str, api_key: str, base_url: str, model: str) -> dict:
+    base_url = base_url.strip().rstrip('/')
+    if not base_url.endswith('/v1'):
+        base_url += '/v1'
+    client = openai.OpenAI(api_key=api_key.strip(), base_url=base_url)
+
+    # 发送请求（带重试）：对所有 openai 异常统一重试，避免偶发网络抖动一次失败
+    last_exc = None
+    for attempt in range(3):
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是红队专家，只输出 JSON，不要任何解释。"},
+                    {"role": "user", "content": POISON_PROMPT.replace('{text}', text)}
+                ],
+                temperature=0.8,
+                max_tokens=1024,
+                timeout=60
+            )
+            last_exc = None
+            break
+        except openai.APIError as e:
+            # APIError 是所有 openai 库异常的基类（含超时、连接、限流、服务端错误），统一重试
+            last_exc = e
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+        except Exception as e:
+            # 非网络/API 类异常（如参数错误）重试无意义，直接抛出
+            raise ValueError(
+                f"❌ 请求异常。\n"
+                f"Base URL: {base_url}\n"
+                f"模型: {model}\n"
+                f"异常类型: {type(e).__name__}\n"
+                f"异常信息: {str(e)}"
+            ) from e
+
+    if last_exc is not None:
+        extra = ""
+        if hasattr(last_exc, 'response'):
+            try:
+                extra = f"\nHTTP状态: {last_exc.response.status_code}\n响应体: {last_exc.response.text[:500]}"
+            except (AttributeError, TypeError):
+                pass
+        raise ValueError(
+            f"❌ API 请求失败（重试3次后）。\n"
+            f"Base URL: {base_url}\n"
+            f"模型: {model}\n"
+            f"错误: {last_exc}{extra}"
+        ) from last_exc
+
+    # ===== 安全提取消息内容（兼容不同 openai 库版本）=====
+    try:
+        content = resp.choices[0].message.content
+    except (AttributeError, KeyError, IndexError) as e:
+        # 尝试将 response 转为字典再提取
+        try:
+            resp_dict = resp.model_dump() if hasattr(resp, 'model_dump') else dict(resp)
+            content = resp_dict['choices'][0]['message']['content']
+        except Exception as ex:
+            raise ValueError(
+                f"❌ 无法从 API 响应中提取消息内容。\n"
+                f"响应对象类型: {type(resp)}\n"
+                f"响应摘要: {str(resp)[:500]}\n"
+                f"原始错误: {e}"
+            ) from ex
+
+    if content is None:
+        raise ValueError("API 返回的消息内容为空 (None)。")
+
+    # ----- 使用 json_repair 修复并解析 JSON -----
+    clean = re.sub(r'^```(?:json)?\s*', '', content)
+    clean = re.sub(r'\s*```$', '', clean)
+    try:
+        result = json_repair.loads(clean)
+    except Exception:
+        raise ValueError(
+            f"❌ 无法解析 API 返回的 JSON。\n"
+            f"原始返回（前500字符）:\n{content[:500]}"
+        )
+
+    # 补全缺失字段
+    result.setdefault('original_text', text)
+    result.setdefault('attack_strategy', '未知')
+    result.setdefault('text', text)
+    result.setdefault('toxic_spans', [])
+    result.setdefault('is_toxic', True)
+
+    return result
+
+
+========================================
+ 文件: core/self_learner.py
+ 路径: /home/ckc/projects/sentinel-edu/core/self_learner.py
+ 行数: 167
+========================================
+
+"""自学习模块：从 LLM 检出结果中提取候选敏感词，反馈到 DFA 词库"""
+
+import sqlite3
+import json
+import os
+import math
+from collections import Counter
+
+
+def collect_missed_spans(db_path='data/scan_results.db'):
+    """查询 LLM 检出但 DFA 漏掉的记录，返回 (spans列表, 文本列表, 总数)"""
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("""
+        SELECT llm_spans, text FROM results
+        WHERE llm_pred = 1 AND (dfa_pred = 0 OR dfa_pred = -1)
+    """)
+    rows = c.fetchall()
+    conn.close()
+
+    spans = []
+    texts = []
+    for span_json, text in rows:
+        if not span_json:
+            continue
+        try:
+            parsed = json.loads(span_json)
+            if isinstance(parsed, list) and parsed:
+                spans.extend(parsed)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if text:
+            texts.append(text)
+
+    return spans, texts, len(rows)
+
+
+def segment_candidates(spans, existing_words=None):
+    """用 jieba 从检出片段中分词，过滤后返回候选词列表"""
+    import jieba
+
+    if existing_words is None:
+        existing_words = set()
+
+    stopwords = {
+        '的', '了', '在', '是', '我', '有', '和', '就', '不', '人', '都', '一',
+        '一个', '上', '也', '很', '到', '说', '要', '去', '你', '会', '着',
+        '没有', '看', '好', '自己', '这', '他', '她', '它', '们', '那', '些',
+        '所', '为', '所以', '因为', '但是', '然而', '虽然', '如果', '可以',
+        '什么', '怎么', '怎样', '哪', '那个', '这个', '这些', '那些', '还是',
+        '或', '而且', '与', '但', '从', '把', '被', '让', '对', '向', '给',
+        '吧', '呢', '啊', '吗', '哦', '哈', '嘛', '呀', '啦', '哇', '嗯',
+        '然后', '之后', '以前', '以后', '时候', '现在', '已经', '正在', '将',
+        '能', '能够', '可能', '应该', '需要', '想', '希望', '觉得', '认为',
+        '知道', '不知道', '了解', '明白', '理解', '懂', '真的', '确实', '当然',
+        '非常', '比较', '更', '最', '很', '太', '特别', '十分', '多么',
+    }
+
+    candidates = []
+    for span in spans:
+        if not span or not isinstance(span, str):
+            continue
+        words = jieba.cut(span)
+        for w in words:
+            w = w.strip()
+            if (len(w) >= 2
+                    and w not in stopwords
+                    and w not in existing_words
+                    and not w.isascii()
+                    and not w.isdigit()):
+                candidates.append(w)
+
+    return candidates
+
+
+def score_candidates(candidates, all_texts):
+    """自实现 TF-IDF 评分：越高代表该词对有毒文本的辨别力越强"""
+    if not candidates or not all_texts:
+        return []
+
+    # 词频统计
+    word_counts = Counter(candidates)
+    total_texts = len(all_texts)
+
+    # 文档频率：该词出现在多少篇文本中
+    doc_freq = {}
+    for word in word_counts:
+        count = sum(1 for t in all_texts if word in t)
+        doc_freq[word] = count
+
+    # TF-IDF: tf * idf
+    # tf = 词频 / 总候选数
+    # idf = log(总文本数 / (包含该词的文本数 + 1))
+    total_candidates = sum(word_counts.values())
+    scores = []
+    for word, tf in word_counts.items():
+        df = doc_freq.get(word, 1)
+        idf = math.log((total_texts + 1) / (df + 1)) + 1
+        score = (tf / total_candidates) * idf * 1000  # 放大便于阅读
+        scores.append({
+            'word': word,
+            'score': round(score, 2),
+            'count': tf,
+            'doc_count': df,
+        })
+
+    scores.sort(key=lambda x: x['score'], reverse=True)
+    return scores
+
+
+def deduplicate(scored_candidates, threshold=85):
+    """模糊去重：相似度 > threshold 的词只保留分数高的"""
+    from rapidfuzz import fuzz
+
+    if len(scored_candidates) <= 1:
+        return scored_candidates
+
+    # 按分数降序排列
+    items = sorted(scored_candidates, key=lambda x: x['score'], reverse=True)
+    kept = []
+    for item in items:
+        is_dup = False
+        for k in kept:
+            if fuzz.ratio(item['word'], k['word']) >= threshold:
+                is_dup = True
+                break
+        if not is_dup:
+            kept.append(item)
+
+    return kept
+
+
+def get_existing_words(wordlist_path='sensitive_words.txt'):
+    """读取当前词库"""
+    if not os.path.exists(wordlist_path):
+        return set()
+    with open(wordlist_path, 'r', encoding='utf-8') as f:
+        return {line.strip() for line in f if line.strip()}
+
+
+def get_context_examples(candidate_word, texts, max_examples=3, context_len=30):
+    """为候选词查找上下文示例"""
+    examples = []
+    for t in texts:
+        idx = t.find(candidate_word)
+        if idx >= 0:
+            start = max(0, idx - context_len)
+            end = min(len(t), idx + len(candidate_word) + context_len)
+            ctx = ('...' if start > 0 else '') + t[start:end] + ('...' if end < len(t) else '')
+            examples.append(ctx)
+            if len(examples) >= max_examples:
+                break
+    return examples
+
+
+def apply_selected(selected_words, wordlist_path='sensitive_words.txt'):
+    """将选中的词追加到敏感词库，去重后返回实际新增数量"""
+    existing = get_existing_words(wordlist_path)
+    new_words = [w for w in selected_words if w not in existing]
+    if not new_words:
+        return 0, []
+
+    with open(wordlist_path, 'a', encoding='utf-8') as f:
+        for w in new_words:
+            f.write(f'\n{w}')
+
+    return len(new_words), new_words
+
+
+========================================
+ 文件: core/text_correction.py
+ 路径: /home/ckc/projects/sentinel-edu/core/text_correction.py
+ 行数: 30
+========================================
+
+import openai
+
+CORRECT_PROMPT = """你是一个专业的文本校对助手。以下文本是由语音识别（ASR）生成的大学思政课教学内容。由于语音识别误差，可能存在同音字、错别字或专业术语拼写错误。
+请你仅修复其中的错别字和标点符号，**绝对不要**改变原句的口语化表达、语气和句子结构。
+原始文本：{text}
+请直接输出纠错后的文本，无需任何解释。"""
+
+
+def correct_text(text: str, api_key: str, base_url: str, model: str) -> str:
+    base_url = base_url.strip().rstrip('/')
+    if not base_url.endswith('/v1'):
+        base_url += '/v1'
+    client = openai.OpenAI(api_key=api_key.strip(), base_url=base_url)
+    try:
+        resp = client.chat.completions.create(
+            model=model.strip(),
+            messages=[
+                {"role": "system", "content": "你是一个专业的文本校对助手，仅纠正错别字和标点符号，不得改变原句表达。"},
+                {"role": "user", "content": CORRECT_PROMPT.replace('{text}', text)}
+            ],
+            temperature=0.0,
+            max_tokens=1024,
+            timeout=30
+        )
+        result = resp.choices[0].message.content
+        if result is None:
+            raise ValueError("API 返回内容为空")
+        return result.strip()
+    except Exception as e:
+        raise ValueError(f"文本纠错失败: {e}") from e
+
+
+========================================
+ 文件: core/utils.py
+ 路径: /home/ckc/projects/sentinel-edu/core/utils.py
+ 行数: 155
+========================================
+
+import json
+import os
+import uuid
+import random
+from pathlib import Path
+
+
+def texts_to_jsonl(texts: list, output_path: str):
+    """将文本列表写入 JSONL，每条记录包含 id, text, is_toxic=False"""
+    with open(output_path, 'w', encoding='utf-8') as f:
+        for text in texts:
+            rec = {
+                "id": str(uuid.uuid4())[:8],
+                "text": text.strip(),
+                "is_toxic": False,
+                "toxic_spans": [],
+                "original_text": "",
+                "attack_strategy": ""
+            }
+            f.write(json.dumps(rec, ensure_ascii=False) + '\n')
+
+
+def merge_jsonl(clean_path, poisoned_path, output_path):
+    """合并两个 JSONL 文件并打乱顺序"""
+    records = []
+    for path in [clean_path, poisoned_path]:
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.strip():
+                    records.append(json.loads(line))
+    random.shuffle(records)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        for rec in records:
+            f.write(json.dumps(rec, ensure_ascii=False) + '\n')
+    return output_path
+
+
+def load_jsonl(path):
+    data = []
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if line.strip():
+                data.append(json.loads(line))
+    return data
+
+
+def save_dataset(jsonl_path, title, api_key=None, base_url=None, model=None):
+    """将 JSONL 数据集保存到 data/datasets/ 目录，带时间戳和标题。
+    如果提供 API 参数，则用 LLM 自动生成标题。否则使用给定标题。
+    返回 (保存路径, 标题)"""
+    import datetime
+    import shutil
+
+    datasets_dir = os.path.join('data', 'datasets')
+    os.makedirs(datasets_dir, exist_ok=True)
+
+    # 如果提供了 API，自动生成标题
+    if api_key and base_url and model and title is None:
+        try:
+            title = _generate_dataset_title(jsonl_path, api_key, base_url, model)
+        except Exception as e:
+            print(f"[WARN] AI 标题生成失败: {e}")
+    if not title:
+        title = '测试集'
+
+    # 生成带时间戳的文件名
+    ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    safe_title = title.replace('/', '_').replace('\\', '_')[:50]
+    basename = f'{ts}_{safe_title}'
+    dest_jsonl = os.path.join(datasets_dir, f'{basename}.jsonl')
+    dest_meta = os.path.join(datasets_dir, f'{basename}.meta.json')
+
+    # 拷贝 JSONL
+    shutil.copy2(jsonl_path, dest_jsonl)
+
+    # 写元数据
+    data = load_jsonl(jsonl_path)
+    total = len(data)
+    toxic_count = sum(1 for r in data if r.get('is_toxic'))
+    meta = {
+        'title': title,
+        'created': ts,
+        'total': total,
+        'toxic_count': toxic_count,
+        'clean_count': total - toxic_count,
+        'source': jsonl_path,
+    }
+    with open(dest_meta, 'w', encoding='utf-8') as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    return dest_jsonl, title
+
+
+def _generate_dataset_title(jsonl_path, api_key, base_url, model):
+    """调用 LLM 为数据集生成简短标题"""
+    import openai
+    data = load_jsonl(jsonl_path)
+    # 采样前几条文本作为提示
+    samples = [r.get('text', '')[:100] for r in data[:5] if r.get('text')]
+    sample_text = '\n'.join(samples[:3])
+
+    client = openai.OpenAI(api_key=api_key, base_url=base_url)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[{
+            "role": "user",
+            "content": (
+                f"以下是一个教学文本安全测试数据集的样本：\n{sample_text}\n\n"
+                f"数据集共 {len(data)} 条。请为这个数据集生成一个简短的中文标题（10字以内），"
+                f"用于文件命名。只输出标题，不要其他内容。"
+            )
+        }],
+        max_tokens=20,
+        temperature=0.3
+    )
+    title = resp.choices[0].message.content
+    if title:
+        return title.strip().strip('"').strip("'")
+    return '测试集'
+
+
+def delete_dataset(dataset_path):
+    """删除指定的数据集（JSONL + meta.json）"""
+    p = Path(dataset_path)
+    meta = p.with_suffix('.meta.json')
+    for f in (p, meta):
+        if f.exists():
+            f.unlink()
+
+
+def list_datasets():
+    """列出 data/datasets/ 下所有已保存的数据集"""
+    datasets_dir = os.path.join('data', 'datasets')
+    if not os.path.isdir(datasets_dir):
+        return []
+    datasets = []
+    for f in sorted(Path(datasets_dir).glob('*.jsonl'), reverse=True):
+        meta_path = f.with_suffix('.meta.json')
+        meta = {}
+        if meta_path.exists():
+            try:
+                with open(meta_path, 'r', encoding='utf-8') as mf:
+                    meta = json.load(mf)
+            except Exception as e:
+                print(f"[WARN] 元数据文件解析失败 {meta_path}: {e}")
+        datasets.append({
+            'path': str(f),
+            'name': f.stem,
+            'title': meta.get('title', f.stem),
+            'created': meta.get('created', ''),
+            'total': meta.get('total', '?'),
+            'toxic_count': meta.get('toxic_count', '?'),
+            'clean_count': meta.get('clean_count', '?'),
+        })
+    return datasets
+
+
+========================================
+ 文件: views/__init__.py
+ 路径: /home/ckc/projects/sentinel-edu/views/__init__.py
+ 行数: 8
+========================================
+
+# Sentinel-Edu 视图模块
+from views.helpers import (
+    highlight_toxic, context_snippet, strategy_to_color,
+    safe_json_loads, to_native, check_api_connection, run_concurrently
+)
+from views.tab1_build import render_tab1
+from views.tab2_detect import render_tab2
+from views.tab3_analysis import render_tab3
+
+
+========================================
+ 文件: views/helpers.py
+ 路径: /home/ckc/projects/sentinel-edu/views/helpers.py
+ 行数: 148
+========================================
+
+"""共享 UI 辅助函数：高亮、上下文截取、颜色映射、JSON 安全解析等"""
+
+import json
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+def highlight_toxic(text, toxic_spans, color='#ff4d4d'):
+    """将 toxic_spans 中的内容以指定颜色高亮，返回 HTML 字符串"""
+    if not toxic_spans:
+        return text
+    escaped = [re.escape(span) for span in toxic_spans]
+    pattern = re.compile('|'.join(escaped), re.IGNORECASE)
+    return pattern.sub(
+        lambda m: f'<mark style="background-color:{color}; color:white; padding:0 2px;">{m.group()}</mark>',
+        text
+    )
+
+
+def strategy_to_color(strategy: str) -> str:
+    """将投毒策略映射为高亮颜色：显性=红, 隐性=黄, 不当比喻=橙"""
+    if '显性' in strategy:
+        return '#ff4d4d'
+    if '隐性' in strategy:
+        return '#ffc107'
+    if '比喻' in strategy:
+        return '#ff8c00'
+    return '#ff4d4d'
+
+
+def context_snippet(text, spans, context_chars=20, color='#ff4d4d'):
+    """截取毒点附近上下文，返回 (HTML高亮文本, 是否被截断)"""
+    if not spans:
+        return text[:150] + ('...' if len(text) > 150 else ''), len(text) > 150
+    positions = []
+    for span in spans:
+        idx = text.find(span)
+        if idx >= 0:
+            start = max(0, idx - context_chars)
+            end = min(len(text), idx + len(span) + context_chars)
+            positions.append((start, end))
+    if not positions:
+        return text[:150] + ('...' if len(text) > 150 else ''), len(text) > 150
+    positions.sort()
+    merged = []
+    for s, e in positions:
+        if not merged or s > merged[-1][1]:
+            merged.append([s, e])
+        else:
+            merged[-1][1] = max(merged[-1][1], e)
+    sorted_spans = sorted(spans, key=len, reverse=True)
+    parts = []
+    trunc = False
+    for i, (s, e) in enumerate(merged):
+        if i == 0 and s > 0:
+            parts.append('…')
+            trunc = True
+        segment = highlight_toxic(text[s:e], sorted_spans, color=color)
+        parts.append(segment)
+        if i < len(merged) - 1:
+            parts.append('…')
+        elif e < len(text):
+            parts.append('…')
+            trunc = True
+    return ''.join(parts), trunc
+
+
+def check_api_connection(api_key, base_url, model):
+    """测试大模型 API 连通性，返回 (success, message)"""
+    if not api_key or not base_url or not model:
+        return False, "请填写 API Key、Base URL 和模型名称。"
+    base_url = base_url.strip().rstrip('/')
+    if not base_url.endswith('/v1'):
+        base_url += '/v1'
+    try:
+        import openai
+        client = openai.OpenAI(api_key=api_key.strip(), base_url=base_url)
+        resp = client.chat.completions.create(
+            model=model.strip(),
+            messages=[{"role": "user", "content": "测试连接"}],
+            max_tokens=5,
+            timeout=10
+        )
+        return True, f"✅ 连接成功 (模型响应: {resp.choices[0].message.content})"
+    except Exception as e:
+        return False, f"❌ 连接失败: {str(e)}"
+
+
+def to_native(v):
+    """将 numpy 类型转为 Python 原生类型，用于 st.json 序列化"""
+    import numpy as np
+    if isinstance(v, (np.integer,)):
+        return int(v)
+    if isinstance(v, (np.floating,)):
+        return float(v)
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    return v
+
+
+def safe_json_loads(value):
+    """安全解析 JSON 字符串，处理 pandas NaT/NaN/None 情况"""
+    if value is None:
+        return []
+    if isinstance(value, float):
+        return []
+    if not isinstance(value, (str, bytes, bytearray)):
+        return []
+    if not value.strip():
+        return []
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def run_concurrently(tasks, max_workers=6, progress_placeholder=None, progress_text=""):
+    """并发执行任务列表，返回结果列表（按输入顺序）。自动显示进度和预计剩余时间。"""
+    import time
+    results = [None] * len(tasks)
+    t_start = time.time()
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_idx = {}
+        for idx, task in enumerate(tasks):
+            func, args = task[0], task[1] if len(task) > 1 else ()
+            if isinstance(args, dict):
+                future = executor.submit(func, **args)
+            else:
+                future = executor.submit(func, *args)
+            future_to_idx[future] = idx
+
+        completed = 0
+        total = len(tasks)
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                results[idx] = future.result()
+            except Exception as e:
+                results[idx] = e
+            completed += 1
+            if progress_placeholder is not None:
+                elapsed = time.time() - t_start
+                eta = (elapsed / completed) * (total - completed) if completed > 0 else 0
+                progress_placeholder.progress(
+                    completed / total,
+                    text=f"{progress_text} {completed}/{total} | 耗时 {elapsed:.0f}s | 预计剩余 {eta:.0f}s"
+                )
+    return results
+
+
+========================================
+ 文件: views/tab1_build.py
+ 路径: /home/ckc/projects/sentinel-edu/views/tab1_build.py
+ 行数: 318
+========================================
+
+"""Tab 1: 测试集构建 — 输入 → ASR → 纠错 → 投毒 → JSONL"""
+
+import streamlit as st
+import os
+import tempfile
+import json
+import uuid
+import random
+import shutil
+from pathlib import Path
+
+from core.asr import extract_audio_from_video, transcribe_audio_api, transcribe_audio_local, download_bilibili_video, is_whisper_model_downloaded, get_local_whisper_model
+from core.text_correction import correct_text
+from core.poison_generator import generate_poison
+from core.utils import texts_to_jsonl, merge_jsonl, load_jsonl, save_dataset
+from views.helpers import highlight_toxic, run_concurrently
+
+
+def _split_sentences(text: str) -> list:
+    """将文本按中英文标点分割为句子片段"""
+    import re
+    # 按中英文句号、问号、感叹号、分号、换行分割
+    parts = re.split(r'[。！？；\.\?!;\n]+', text)
+    return [s.strip() for s in parts if s.strip()]
+
+
+def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
+                use_local_whisper, local_whisper_model):
+    st.header("步骤1：获取原始文本")
+    input_method = st.radio(
+        "选择输入方式", ["📁 上传音视频文件", "🔗 B站视频链接", "✏️ 直接输入文本"], horizontal=True)
+    raw_texts = []
+
+    prompt_text = "这是一堂关于马克思主义基本原理、毛泽东思想、邓小平理论、唯物辩证法、社会主义核心价值观的大学思政课。"
+
+    if input_method == "📁 上传音视频文件":
+        uploaded_file = st.file_uploader(
+            "上传音频或视频", type=["wav", "mp3", "m4a", "mp4", "flv", "mkv"])
+        if uploaded_file:
+            file_id = f"{uploaded_file.name}_{uploaded_file.size}"
+            # Only process if the file changed (avoid re-running on every widget interaction)
+            if st.session_state.get('_last_file_id') != file_id:
+                st.session_state['_last_file_id'] = file_id
+                suffix = Path(uploaded_file.name).suffix
+                tmp_path = None
+                audio_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                        tmp.write(uploaded_file.read())
+                        tmp_path = tmp.name
+
+                    is_video = suffix.lower() in ['.mp4', '.flv', '.mkv', '.avi', '.mov', '.webm']
+                    with st.spinner("正在提取音频..." if is_video else "正在读取文件..."):
+                        if is_video:
+                            audio_path = extract_audio_from_video(
+                                tmp_path, st.session_state.ffmpeg_path)
+                        else:
+                            audio_path = tmp_path
+                    if is_video:
+                        st.success("音频提取成功")
+
+                    if use_local_whisper:
+                        if not is_whisper_model_downloaded(local_whisper_model):
+                            st.info(f"📥 首次使用需下载 Whisper {local_whisper_model} 模型（约500MB），请耐心等待...")
+                        with st.spinner(f"正在加载 Whisper {local_whisper_model} 模型到内存..."):
+                            get_local_whisper_model(local_whisper_model)
+                        progress_bar = st.progress(0, text="正在语音转写... 0%")
+
+                        def _update(pct):
+                            progress_bar.progress(pct, text=f"正在语音转写... {pct * 100:.0f}%")
+                        transcript = transcribe_audio_local(
+                            audio_path, model_name=local_whisper_model, initial_prompt=prompt_text,
+                            progress_callback=_update)
+                        progress_bar.progress(1.0, text="转写完成")
+                        st.success("转写完成")
+                    else:
+                        if not api_ready:
+                            st.error("未配置大模型 API 密钥，无法使用云端 ASR。请启用本地 Whisper。")
+                            st.stop()
+                        with st.spinner("云端 Whisper 转写中，请耐心等待..."):
+                            transcript = transcribe_audio_api(
+                                audio_path, api_key, base_url, prompt_text)
+                        st.success("转写完成")
+
+                    st.session_state['asr_transcript'] = transcript
+                except Exception as e:
+                    st.error(f"处理文件失败：{e}")
+                    st.session_state.pop('_last_file_id', None)
+                finally:
+                    for p in {tmp_path, audio_path}:
+                        if p and os.path.exists(p):
+                            try:
+                                os.unlink(p)
+                            except OSError:
+                                pass
+
+            # Show editable transcript (persists across re-runs)
+            default_transcript = st.session_state.get('asr_transcript', '')
+            edited = st.text_area(
+                "转写结果（可手动编辑）", default_transcript, height=200,
+                key="transcript_editor")
+            raw_texts = [s for s in _split_sentences(edited)]
+
+    elif input_method == "🔗 B站视频链接":
+        bili_url = st.text_input("B站视频地址")
+        if bili_url and st.button("开始解析并下载"):
+            if not shutil.which(st.session_state.bbdown_path):
+                st.error("BBDown 不可用，请检查安装")
+            else:
+                with st.spinner("使用 BBDown 下载中..."):
+                    try:
+                        info = download_bilibili_video(
+                            bili_url, st.session_state.bbdown_path)
+                        if info['subtitle']:
+                            sub_text = Path(info['subtitle']).read_text(
+                                encoding='utf-8')
+                            st.success("找到人工字幕，跳过语音转写")
+                            st.session_state['bili_transcript'] = sub_text
+                            raw_texts = [s for s in _split_sentences(sub_text)]
+                        elif info['video']:
+                            with st.spinner("无字幕，正在提取音频..."):
+                                audio_path = extract_audio_from_video(
+                                    info['video'], st.session_state.ffmpeg_path)
+                            st.success("音频提取成功")
+                            if use_local_whisper:
+                                if not is_whisper_model_downloaded(local_whisper_model):
+                                    st.info(f"📥 首次使用需下载 Whisper {local_whisper_model} 模型（约500MB），请耐心等待...")
+                                with st.spinner(f"正在加载 Whisper {local_whisper_model} 模型到内存..."):
+                                    get_local_whisper_model(local_whisper_model)
+                                progress_bar = st.progress(0, text="正在语音转写... 0%")
+
+                                def _update2(pct):
+                                    progress_bar.progress(pct, text=f"正在语音转写... {pct * 100:.0f}%")
+                                transcript = transcribe_audio_local(
+                                    audio_path, model_name=local_whisper_model, initial_prompt=prompt_text,
+                                    progress_callback=_update2)
+                                progress_bar.progress(1.0, text="转写完成")
+                                st.success("转写完成")
+                            else:
+                                if not api_ready:
+                                    st.error("未配置 API 密钥，无法使用云端 ASR。请启用本地 Whisper。")
+                                    st.stop()
+                                with st.spinner("云端 Whisper 转写中，请耐心等待..."):
+                                    transcript = transcribe_audio_api(
+                                        audio_path, api_key, base_url, prompt_text)
+                                st.success("转写完成")
+                            st.session_state['bili_transcript'] = transcript
+                            raw_texts = [s for s in _split_sentences(transcript)]
+                        else:
+                            st.error("BBDown 未找到视频或字幕文件，请检查链接是否有效")
+                    except Exception as e:
+                        st.error(f"处理失败：{e}")
+        # Show cached results outside the button block
+        if st.session_state.get('bili_transcript'):
+            edited = st.text_area("字幕/转写内容", st.session_state['bili_transcript'], height=150,
+                                  key="bili_transcript_editor")
+            if not raw_texts:
+                raw_texts = [s for s in _split_sentences(edited)]
+
+    elif input_method == "✏️ 直接输入文本":
+        manual_text = st.text_area("请输入课堂文本", height=200)
+        if manual_text:
+            raw_texts = [s for s in _split_sentences(manual_text)]
+
+    info_placeholder = st.empty()
+    if raw_texts:
+        st.session_state['raw_texts'] = raw_texts
+        info_placeholder.info(f"已获取 {len(raw_texts)} 条文本片段")
+
+    # --- 步骤2：文本纠错（可选） ---
+    st.markdown("---")
+    st.header("步骤2：文本纠错（可选）")
+    has_raw = bool(st.session_state.get('raw_texts'))
+    if st.button("✨ 开始大模型纠错", disabled=not has_raw,
+                 help=None if has_raw else "请先在步骤1获取原始文本"):
+        if not api_ready:
+            st.error("缺少 API 配置")
+        else:
+            import time
+            corrected = []
+            total = len(st.session_state.raw_texts)
+            progress_bar = st.progress(0, text=f"文本纠错中... 0/{total}")
+            t_start = time.time()
+            for i, text in enumerate(st.session_state.raw_texts):
+                try:
+                    corr = correct_text(text, api_key, base_url, llm_model)
+                    corrected.append(corr)
+                except Exception as e:
+                    st.warning(f"第{i}条纠错失败，保留原句：{e}")
+                    corrected.append(text)
+                elapsed = time.time() - t_start
+                eta = (elapsed / (i + 1)) * (total - i - 1) if i > 0 else 0
+                progress_bar.progress(
+                    (i + 1) / total,
+                    text=f"文本纠错中... {i + 1}/{total} | 耗时 {elapsed:.0f}s | 预计剩余 {eta:.0f}s"
+                )
+            st.session_state['corrected_texts'] = corrected
+            st.success(f"纠错完成，共 {total} 条，耗时 {time.time() - t_start:.0f}s")
+
+    final_texts = st.session_state.get(
+        'corrected_texts', st.session_state.get('raw_texts', []))
+
+    # --- 步骤3：生成无毒 JSONL ---
+    st.markdown("---")
+    st.header("步骤3：生成无毒文本集（JSONL）")
+    has_final = bool(final_texts)
+    if st.button("📝 生成无毒 JSONL", disabled=not has_final,
+                 help=None if has_final else "等待文本就绪"):
+        texts_to_jsonl(final_texts, 'data/clean_corpus.jsonl')
+        st.session_state['clean_jsonl'] = 'data/clean_corpus.jsonl'
+        st.success(f"无毒文本已保存至 data/clean_corpus.jsonl，共 {len(final_texts)} 条")
+
+    # --- 步骤4：投毒生成 ---
+    st.markdown("---")
+    st.header("步骤4：投毒生成有毒文本（红队测试）")
+    clean_path = st.session_state.get('clean_jsonl')
+    has_clean = clean_path and os.path.exists(clean_path)
+    poison_ratio = st.slider("投毒比例", 0.1, 1.0, 0.3, step=0.1, disabled=not has_clean)
+    if st.button("🦠 开始投毒生成", disabled=not has_clean,
+                 help=None if has_clean else "请先生成无毒 JSONL"):
+        if not api_ready:
+            st.error("缺少 API 配置")
+        else:
+            clean_data = load_jsonl(clean_path)
+            total = len(clean_data)
+            poison_count = max(1, int(total * poison_ratio))
+            selected = random.sample(clean_data, poison_count)
+
+            tasks = [(generate_poison, (rec['text'], api_key,
+                      base_url, llm_model)) for rec in selected]
+            progress_bar = st.progress(0)
+            raw_results = run_concurrently(
+                tasks, max_workers=concurrency,
+                progress_placeholder=progress_bar, progress_text="投毒生成中"
+            )
+
+            poisoned_records = []
+            for i, (rec, res) in enumerate(zip(selected, raw_results)):
+                if isinstance(res, Exception):
+                    st.warning(f"第{i}条投毒失败")
+                    with st.expander("查看错误"):
+                        st.exception(res)
+                    continue
+                res['id'] = str(uuid.uuid4())[:8]
+                res.setdefault('original_text', rec['text'])
+                res.setdefault('attack_strategy', '未知')
+                poisoned_records.append(res)
+
+            poison_file = 'data/poisoned_corpus.jsonl'
+            with open(poison_file, 'w', encoding='utf-8') as f:
+                for rec in poisoned_records:
+                    out = {
+                        "id": rec['id'],
+                        "text": rec.get('text', ''),
+                        "original_text": rec.get('original_text', ''),
+                        "is_toxic": True,
+                        "toxic_spans": rec.get('toxic_spans', []),
+                        "attack_strategy": rec.get('attack_strategy', '')
+                    }
+                    f.write(json.dumps(out, ensure_ascii=False) + '\n')
+
+            merge_jsonl(clean_path, poison_file, 'data/final_test_mixed.jsonl')
+            st.session_state['final_test'] = 'data/final_test_mixed.jsonl'
+            st.session_state['_poison_generated'] = True
+
+            # 用 AI 自动生成标题建议
+            from core.utils import _generate_dataset_title
+            ai_title = None
+            if api_key and base_url and llm_model:
+                try:
+                    ai_title = _generate_dataset_title(
+                        'data/final_test_mixed.jsonl', api_key, base_url, llm_model)
+                except Exception:
+                    st.warning("AI 标题建议失败，将使用默认名称")
+            st.session_state['_ai_suggested_title'] = ai_title or '测试集'
+
+            st.success(
+                f"投毒完成！共生成 {len(poisoned_records)} 条有毒文本，最终混合集：data/final_test_mixed.jsonl")
+
+    # 投毒完成后显示 AI 命名 + 保存按钮（独立于按钮点击，持久显示）
+    if st.session_state.get('_poison_generated') and os.path.exists('data/final_test_mixed.jsonl'):
+        st.markdown("---")
+        st.subheader("💾 保存测试集")
+        ai_title = st.session_state.get('_ai_suggested_title', '测试集')
+        col_title, col_btn = st.columns([3, 1])
+        with col_title:
+            final_title = st.text_input(
+                "数据集标题", value=ai_title,
+                help="可修改 AI 建议的标题", key="dataset_title_input")
+        with col_btn:
+            st.write("")  # 对齐
+            if st.button("💾 确认保存", type="primary", use_container_width=True):
+                saved_path, saved_title = save_dataset(
+                    'data/final_test_mixed.jsonl', final_title)
+                st.session_state['last_dataset_title'] = saved_title
+                st.session_state['_poison_generated'] = False
+                st.success(f"已保存至：`{saved_path}`")
+                st.rerun()
+
+            final_data = load_jsonl('data/final_test_mixed.jsonl')
+            toxic_samples = [r for r in final_data if r.get('is_toxic')]
+            if toxic_samples:
+                with st.expander(f"🔍 有毒样本对比（共 {len(toxic_samples)} 条）"):
+                    for i, rec in enumerate(toxic_samples[:10]):
+                        original = rec.get('original_text', '（无法获取原文）')
+                        toxic_text = rec.get('text', '')
+                        spans = rec.get('toxic_spans', [])
+                        strategy = rec.get('attack_strategy', '未知')
+                        st.markdown(f"**样本 {i + 1}** | 策略：{strategy}")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.caption("原文")
+                            st.write(original)
+                        with col2:
+                            st.caption("有毒文本（毒点高亮）")
+                            st.markdown(highlight_toxic(
+                                toxic_text, spans), unsafe_allow_html=True)
+                        st.markdown("---")
+
+
+========================================
+ 文件: views/tab2_detect.py
+ 路径: /home/ckc/projects/sentinel-edu/views/tab2_detect.py
+ 行数: 517
+========================================
+
+"""Tab 2: 安全检测 — 文件测试集 或 直接输入文本 → DFA → LLM"""
+
+import streamlit as st
+import os
+from pathlib import Path
+
+from core.dfa_scanner import DFAScanner
+from core.llm_scanner import llm_scan
+from core.database import init_db, save_result, get_all_results, update_llm_result
+from core.config import save_session_state
+from core.utils import load_jsonl, list_datasets, delete_dataset
+from views.helpers import (
+    context_snippet, strategy_to_color, safe_json_loads, to_native, run_concurrently
+)
+
+
+def _init_db_records(all_data, dataset_id):
+    """为新样本插入初始记录（避免覆盖已有检测结果）"""
+    init_db()
+    existing_all = get_all_results()
+    already_in_db = set(existing_all['text_id']) if not existing_all.empty else set()
+    for rec in all_data:
+        if rec['id'] in already_in_db:
+            continue
+        true_label = 1 if rec.get('is_toxic') else 0
+        try:
+            save_result(rec['id'], true_label, -1, -1, [], 0, 0, [],
+                        dataset_id=dataset_id, text=rec.get('text', ''))
+        except Exception:
+            st.warning(f"样本 {rec['id']} 初始记录写入失败")
+
+
+def _dfa_scan_all(all_data, dataset_id, progress_placeholder=None):
+    """DFA 全量扫描，返回 {text_id: (dfa_hit, dfa_words)} 并写库"""
+    import time
+    scanner = DFAScanner('sensitive_words.txt')
+    results = {}
+    total = len(all_data)
+    t_start = time.time()
+    for i, rec in enumerate(all_data):
+        text = rec['text']
+        dfa_hit, dfa_words = scanner.scan(text)
+        results[rec['id']] = (dfa_hit, dfa_words)
+        true_label = 1 if rec.get('is_toxic') else 0
+        reason = f'[显性敏感词]：命中关键词 "{", ".join(dfa_words)}"' if dfa_hit else None
+        save_result(rec['id'], true_label, int(dfa_hit), -1, dfa_words, 0, 0,
+                    llm_spans=None, llm_reason=reason,
+                    dataset_id=dataset_id, text=text)
+        if progress_placeholder is not None:
+            elapsed = time.time() - t_start
+            eta = (elapsed / (i + 1)) * (total - i - 1) if i > 0 else 0
+            progress_placeholder.progress(
+                (i + 1) / total,
+                text=f"一防 DFA 扫描中... {i + 1}/{total} | 耗时 {elapsed:.0f}s | 预计剩余 {eta:.0f}s"
+            )
+    return results
+
+
+def _llm_scan_candidates(candidates, api_key, base_url, llm_model, concurrency, dataset_id):
+    """对候选文本并发执行 LLM 扫描并写库"""
+    progress_bar = st.progress(0, text="二防 LLM 扫描中...")
+    tasks = [(llm_scan, (rec['text'], api_key, base_url, llm_model, dfa_words))
+             for rec, dfa_words in candidates]
+    llm_results = run_concurrently(
+        tasks, max_workers=concurrency,
+        progress_placeholder=progress_bar, progress_text="二防 LLM 扫描中"
+    )
+    for (rec, dfa_words), res in zip(candidates, llm_results):
+        true_label = 1 if rec.get('is_toxic') else 0
+        if isinstance(res, Exception):
+            llm_pred, llm_spans, llm_time, llm_reason = -1, [], 0, ''
+        else:
+            llm_pred = int(res.get('is_toxic', False))
+            llm_spans = res.get('toxic_spans', [])
+            llm_time = res.get('time_cost', 0)
+            category = res.get('category', '隐性偏颇')
+            reason_text = res.get('reason', '')
+            llm_reason = f'[{category}]：{reason_text}' if llm_pred == 1 else ''
+        save_result(rec['id'], true_label, -1, llm_pred, None, 0, llm_time, llm_spans,
+                    llm_reason=llm_reason, dataset_id=dataset_id, text=rec.get('text', ''))
+    progress_bar.empty()
+
+
+def _render_status_table(df_all, current_ids):
+    """样本检测状态总览"""
+    st.markdown("---")
+    st.subheader("样本检测状态")
+    if df_all.empty:
+        return df_all
+    df_all = df_all[df_all['text_id'].isin(current_ids)].copy()
+    if df_all.empty:
+        st.info('暂未检测，请点击上方批量检测按钮')
+        return df_all
+
+    def status(dfa, llm):
+        dfa_str = "✔️" if dfa == 1 else ("✖️" if dfa == 0 else "⬜")
+        llm_str = "✔️" if llm == 1 else ("✖️" if llm == 0 else "⬜")
+        return f"{dfa_str} / {llm_str}"
+    df_all['status'] = df_all.apply(lambda r: status(r['dfa_pred'], r['llm_pred']), axis=1)
+    st.dataframe(df_all[['text_id', 'true_label', 'status']], width='stretch')
+    st.caption(
+        '📖 **列说明**  |  '
+        '`text_id`=样本ID  |  '
+        '`true_label`=真实标签（`1`=🦠有毒, `0`=✅无毒）  |  '
+        '`status`=检测状态（左 **DFA** / 右 **LLM**）  \n'
+        '符号含义：`✔️`=命中拦截  |  `✖️`=安全通过  |  `⬜`=未检测'
+    )
+    return df_all
+
+
+def _render_batch_highlight(df_all, all_data):
+    """批量高亮对比"""
+    st.markdown("---")
+    st.subheader("🔦 批量高亮对比")
+    if df_all.empty:
+        return
+    with st.expander('展开查看所有样本的双防检测高亮', expanded=False):
+        batch_limit = min(len(df_all), 50)
+        for idx in range(batch_limit):
+            row = df_all.iloc[idx]
+            rec = next((r for r in all_data if r['id'] == row['text_id']), None)
+            if rec is None:
+                continue
+            text = rec.get('text', '')
+            dfa_words = safe_json_loads(row['hit_words'])
+            llm_spans = safe_json_loads(row['llm_spans'])
+            dfa_hl, _ = context_snippet(text, dfa_words, color='#ff4d4d')
+            llm_hl, _ = context_snippet(text, llm_spans, color='#ffc107')
+            llm_hl = llm_hl.replace('color:white', 'color:black')
+            label_icon = '🦠有毒' if row['true_label'] == 1 else '✅无毒'
+            llm_reason_val = row.get('llm_reason', '')
+            st.markdown(f'**ID: `{row["text_id"]}`**  |  真实标签: {label_icon}')
+            if llm_reason_val and str(llm_reason_val) != 'nan' and str(llm_reason_val) != 'None':
+                st.caption(f'📝 {llm_reason_val}')
+            col1, col2 = st.columns(2)
+            with col1:
+                st.caption('🔴 一防 DFA (显性敏感词)')
+                st.markdown(dfa_hl or '(未检测或无命中)', unsafe_allow_html=True)
+            with col2:
+                st.caption('🟡 二防 LLM (隐性偏颇)')
+                st.markdown(llm_hl or '(未检测或无命中)', unsafe_allow_html=True)
+            if idx < batch_limit - 1:
+                st.markdown('---')
+        if len(df_all) > 50:
+            st.info(f'仅展示前 50 条，共 {len(df_all)} 条')
+
+
+def _render_detail_view(df_all, all_data):
+    """样本深度对比（筛选 + 三栏高亮 + 命中分析）"""
+    st.markdown("---")
+    st.subheader("🔍 样本深度对比")
+    if df_all.empty:
+        return
+
+    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+    with col_f1:
+        filter_toxic = st.selectbox("真实标签", ["全部", "有毒", "无毒"])
+    with col_f2:
+        filter_dfa = st.selectbox("DFA 结果", ["全部", "命中", "安全", "未检测"])
+    with col_f3:
+        filter_llm = st.selectbox("LLM 结果", ["全部", "命中", "安全", "未检测"])
+    with col_f4:
+        search_text = st.text_input("🔍 文本搜索", placeholder="输入关键词...")
+
+    filtered_df = df_all.copy()
+    if filter_toxic == "有毒":
+        filtered_df = filtered_df[filtered_df['true_label'] == 1]
+    elif filter_toxic == "无毒":
+        filtered_df = filtered_df[filtered_df['true_label'] == 0]
+    if filter_dfa == "命中":
+        filtered_df = filtered_df[filtered_df['dfa_pred'] == 1]
+    elif filter_dfa == "安全":
+        filtered_df = filtered_df[filtered_df['dfa_pred'] == 0]
+    elif filter_dfa == "未检测":
+        filtered_df = filtered_df[filtered_df['dfa_pred'] == -1]
+    if filter_llm == "命中":
+        filtered_df = filtered_df[filtered_df['llm_pred'] == 1]
+    elif filter_llm == "安全":
+        filtered_df = filtered_df[filtered_df['llm_pred'] == 0]
+    elif filter_llm == "未检测":
+        filtered_df = filtered_df[filtered_df['llm_pred'] == -1]
+    if search_text:
+        matched_ids = {r['id'] for r in all_data if search_text.lower() in r.get('text', '').lower()}
+        filtered_df = filtered_df[filtered_df['text_id'].isin(matched_ids)]
+
+    sample_ids = filtered_df['text_id'].tolist()
+    st.caption(f'共 {len(filtered_df)} 条匹配结果')
+
+    if not sample_ids:
+        st.info('没有符合筛选条件的样本')
+        return
+
+    selected_id = st.selectbox("选择样本", sample_ids)
+    if not selected_id:
+        return
+
+    rec = next((r for r in all_data if r['id'] == selected_id), None)
+    if rec is None:
+        st.warning(f'数据 ID「{selected_id}」在当前选中的 JSONL 文件中未找到。')
+        db_row = df_all[df_all['text_id'] == selected_id].iloc[0]
+        st.markdown("**📊 数据库已有检测记录（仅展示，无原文）**")
+        st.json({
+            "text_id": to_native(selected_id),
+            "真实标签": "有毒" if to_native(db_row['true_label']) == 1 else "无毒",
+            "DFA 预测": to_native(db_row['dfa_pred']),
+            "LLM 预测": to_native(db_row['llm_pred']),
+            "DFA 命中词": safe_json_loads(db_row['hit_words']),
+            "LLM 检出片段": safe_json_loads(db_row['llm_spans']),
+            "判定理由": str(db_row.get('llm_reason', '')) if str(db_row.get('llm_reason', '')) not in ('nan', 'None', '') else '无',
+        })
+        return
+
+    db_row = df_all[df_all['text_id'] == selected_id].iloc[0]
+    is_toxic = rec.get('is_toxic', False)
+    original = rec.get('original_text') or (rec.get('text') if not is_toxic else '（无原文）')
+    toxic_text = rec.get('text', '')
+    true_spans = rec.get('toxic_spans', [])
+    strategy = rec.get('attack_strategy', '—')
+    dfa_pred = db_row['dfa_pred']
+    llm_pred = db_row['llm_pred']
+    dfa_words = safe_json_loads(db_row['hit_words'])
+    llm_spans = safe_json_loads(db_row['llm_spans'])
+
+    # 原文
+    st.markdown("**📄 原始文本（毒点上下文）**")
+    true_spans_for_ctx = true_spans if is_toxic else []
+    original_ctx, orig_trunc = context_snippet(original, true_spans_for_ctx)
+    st.markdown(original_ctx, unsafe_allow_html=True)
+    if orig_trunc:
+        with st.expander('查看完整原文'):
+            st.info(original)
+
+    # 三栏高亮对比
+    st.markdown("---")
+    st.markdown("**🛡️ 三栏高亮对比（上下文）**")
+    col_a, col_b, col_c = st.columns(3)
+    true_color = strategy_to_color(strategy) if is_toxic else '#ff4d4d'
+    with col_a:
+        if is_toxic:
+            gradient_label = {'显性': '🔴 显性敏感词', '隐性': '🟡 隐性偏颇', '比喻': '🟠 不当比喻'}.get(
+                strategy[:2] if strategy else '', '🎯 预设毒点')
+            st.caption(gradient_label)
+            true_hl, _ = context_snippet(toxic_text, true_spans, color=true_color)
+            if '#ffc107' in true_color:
+                true_hl = true_hl.replace('color:white', 'color:black')
+            st.markdown(true_hl or '(无)', unsafe_allow_html=True)
+            st.caption(f'策略: {strategy}')
+        else:
+            st.caption('✅ 无毒样本')
+            st.write(toxic_text[:200] + ('...' if len(toxic_text) > 200 else ''))
+    with col_b:
+        st.caption('🔴 一防 DFA (显性敏感词)')
+        if dfa_pred == -1:
+            st.info('未检测')
+        elif dfa_pred == 1:
+            st.error(f'命中: {dfa_words}')
+        else:
+            st.success('安全')
+        dfa_hl, _ = context_snippet(toxic_text, dfa_words, color='#ff4d4d')
+        st.markdown(dfa_hl or '(无命中)', unsafe_allow_html=True)
+    with col_c:
+        st.caption('🟡 二防 LLM (隐性偏颇)')
+        if llm_pred == -1:
+            st.info('未检测')
+        elif llm_pred == 1:
+            st.error(f'命中: {llm_spans}')
+        else:
+            st.success('安全')
+        llm_hl, _ = context_snippet(toxic_text, llm_spans, color='#ffc107')
+        llm_hl = llm_hl.replace('color:white', 'color:black')
+        st.markdown(llm_hl or '(无命中)', unsafe_allow_html=True)
+
+    # 判定理由
+    llm_reason_val = db_row.get('llm_reason', '')
+    if llm_reason_val and str(llm_reason_val) not in ('nan', 'None', ''):
+        st.markdown("---")
+        st.markdown(f"📝 **判定理由**：{llm_reason_val}")
+
+    # 命中分析
+    if is_toxic:
+        st.markdown("---")
+        st.subheader("📊 检测效果分析（命中 vs 预设毒点）")
+        true_set = set(true_spans)
+        col_a1, col_a2 = st.columns(2)
+        with col_a1:
+            st.markdown("**🔴 DFA 检测分析**")
+            if dfa_pred == -1:
+                st.caption('未运行 DFA 检测')
+            else:
+                dfa_set = set(dfa_words)
+                dfa_hits = {t for t in true_set if t in dfa_words}
+                remaining_dfa = true_set - dfa_hits
+                for t in remaining_dfa:
+                    if any(t in d for d in dfa_words) or any(d in t for d in dfa_words):
+                        dfa_hits.add(t)
+                dfa_miss = true_set - dfa_hits
+                dfa_extra = dfa_set - true_set
+                st.write(f"✅ 命中：{list(dfa_hits) if dfa_hits else '无'}")
+                st.write(f"❌ 漏报：{list(dfa_miss) if dfa_miss else '无'}")
+                st.write(f"⚠️ 额外检出：{list(dfa_extra) if dfa_extra else '无'}")
+        with col_a2:
+            st.markdown("**🟡 LLM 检测分析**")
+            if llm_pred == -1:
+                st.caption('未运行 LLM 检测')
+            else:
+                llm_set = set(llm_spans)
+                llm_hits = {t for t in true_set if t in llm_spans}
+                remaining_llm = true_set - llm_hits
+                for t in remaining_llm:
+                    if any(t in span for span in llm_spans) or any(span in t for span in llm_spans):
+                        llm_hits.add(t)
+                llm_miss = true_set - llm_hits
+                llm_extra = llm_set - true_set
+                st.write(f"✅ 命中：{list(llm_hits) if llm_hits else '无'}")
+                st.write(f"❌ 漏报：{list(llm_miss) if llm_miss else '无'}")
+                st.write(f"⚠️ 额外检出：{list(llm_extra) if llm_extra else '无'}")
+    else:
+        st.caption("无毒样本无需进行命中分析。")
+
+
+def _render_inline_detect(api_ready, api_key, base_url, llm_model):
+    """直接输入文本并检测（不依赖 JSONL 文件）"""
+    st.markdown("---")
+    st.subheader("✏️ 输入待检测文本")
+    inline_text = st.text_area("请输入课堂文本内容", height=150, placeholder="在此粘贴或输入文本...")
+
+    if not inline_text.strip():
+        st.caption("请输入文本后点击检测")
+        return
+
+    if st.button("🔍 开始检测", type="primary", disabled=not api_ready):
+        scanner = DFAScanner('sensitive_words.txt')
+
+        # DFA
+        with st.spinner("一防 DFA 扫描中..."):
+            dfa_hit, dfa_words = scanner.scan(inline_text)
+
+        # LLM 全量扫描（DFA 命中≠有毒，由 LLM 结合上下文做最终判定）
+        llm_pred, llm_spans, llm_reason = -1, [], ''
+        if api_ready:
+            with st.spinner("二防 LLM 语义分析中..."):
+                try:
+                    result = llm_scan(inline_text, api_key, base_url, llm_model, dfa_words)
+                    llm_pred = int(result.get('is_toxic', False))
+                    llm_spans = result.get('toxic_spans', [])
+                    if llm_pred == 1:
+                        category = result.get('category', '隐性偏颇')
+                        llm_reason = f"[{category}]：{result.get('reason', '')}"
+                except Exception as e:
+                    st.warning(f"LLM 扫描失败：{e}")
+
+        # 展示结果
+        st.markdown("---")
+        st.subheader("📊 检测结果")
+        overall_toxic = llm_pred == 1
+        if overall_toxic:
+            st.error("⚠️ 该文本被判定为**有毒**")
+            if llm_reason:
+                st.markdown(f"📝 **判定理由**：{llm_reason}")
+        else:
+            st.success("✅ 该文本判定为**安全**")
+
+        col_r1, col_r2 = st.columns(2)
+        with col_r1:
+            st.markdown("**🔴 一防 DFA（关键词线索）**")
+            if dfa_hit:
+                st.warning(f"发现关键词：{dfa_words}（供 LLM 参考）")
+                dfa_display, _ = context_snippet(inline_text, dfa_words, color='#ff4d4d')
+            else:
+                st.success("未发现敏感词")
+                dfa_display = inline_text[:300]
+            st.markdown(dfa_display, unsafe_allow_html=True)
+
+        with col_r2:
+            st.markdown("**🟡 二防 LLM**")
+            if llm_pred == 1:
+                st.error(f"检出片段：{llm_spans}")
+                llm_display, _ = context_snippet(inline_text, llm_spans, color='#ffc107')
+                llm_display = llm_display.replace('color:white', 'color:black')
+            elif llm_pred == 0:
+                st.success("安全通过")
+                llm_display = inline_text[:300]
+            else:
+                st.info("未检测（DFA 已拦截）")
+                llm_display = '(跳过)'
+            st.markdown(llm_display, unsafe_allow_html=True)
+
+
+def render_tab2(api_ready, api_key, base_url, llm_model, concurrency):
+    st.header("双重安全检测")
+
+    detect_mode = st.radio(
+        "选择检测模式", ["📂 选择测试集文件", "✏️ 直接输入文本"], horizontal=True)
+
+    if detect_mode == "✏️ 直接输入文本":
+        _render_inline_detect(api_ready, api_key, base_url, llm_model)
+        return
+
+    # --- 文件模式 ---
+    file_category = st.radio(
+        "文件来源", ["📂 中间产物（临时文件）", "💾 已保存数据集"], horizontal=True)
+
+    if file_category == "📂 中间产物（临时文件）":
+        temp_files = {f.name: os.path.join("data", f.name)
+                      for f in sorted(Path("data").glob('*.jsonl'))}
+        if not temp_files:
+            st.info("暂无临时文件，请先在「测试集构建」中生成")
+            st.stop()
+        selected_label = st.selectbox("选择临时文件", options=list(temp_files.keys()))
+        if not selected_label:
+            st.stop()
+        test_file_path = temp_files[selected_label]
+    else:
+        saved = list_datasets()
+        if not saved:
+            st.info("暂无已保存的数据集，请在「测试集构建」中生成并保存")
+            st.stop()
+        options = {f"💾 {ds['title']} ({ds['created']}, {ds['total']}条)": ds
+                   for ds in saved}
+        selected_label = st.selectbox("选择已保存的数据集", options=list(options.keys()))
+        if not selected_label:
+            st.stop()
+        selected_ds = options[selected_label]
+        test_file_path = selected_ds['path']
+
+        # 删除按钮
+        col_info, col_del = st.columns([3, 1])
+        with col_del:
+            with st.popover("🗑️ 删除此数据集"):
+                st.warning(f"确定要删除「{selected_ds['title']}」吗？")
+                st.caption(f"文件：{selected_ds['path']}")
+                if st.button("确认删除", type="primary"):
+                    delete_dataset(selected_ds['path'])
+                    st.success("已删除")
+                    st.rerun()
+    all_data = load_jsonl(test_file_path)
+    dataset_id = os.path.basename(test_file_path)
+    st.session_state['_current_dataset_id'] = dataset_id
+    st.success(f"已加载 {len(all_data)} 条样本，其中 {sum(1 for r in all_data if r.get('is_toxic'))} 条有毒")
+
+    _init_db_records(all_data, dataset_id)
+    current_ids = {r['id'] for r in all_data}
+    st.session_state['_tab2_current_ids'] = current_ids
+    save_session_state()
+
+    # ----- 功能按钮区 -----
+    st.subheader("批量检测")
+    col_main, col_debug1, col_debug2 = st.columns([2, 1, 1])
+
+    with col_main:
+        if st.button("🚀 自动检测 (DFA → LLM)", type="primary", disabled=not api_ready, width='stretch'):
+            # — 阶段1：DFA 全量扫描（收集线索）—
+            progress = st.progress(0, text="一防 DFA 扫描中...")
+            dfa_results = _dfa_scan_all(all_data, dataset_id, progress_placeholder=progress)
+            progress.empty()
+            dfa_hit_count = sum(1 for hit, _ in dfa_results.values() if hit)
+
+            # — 阶段2：LLM 全量扫描（DFA 命中≠有毒，LLM 结合上下文做最终判决）—
+            # 所有文本都送 LLM，DFA 命中词作为线索（LLM 会甄别否定句/引述等正当语境）
+            all_candidates = [(rec, dfa_results[rec['id']][1]) for rec in all_data]
+            _llm_scan_candidates(all_candidates, api_key, base_url, llm_model, concurrency, dataset_id)
+
+            st.success(
+                f"检测完成！DFA 发现 {dfa_hit_count} 个关键词线索，"
+                f"全部 {len(all_data)} 条已由 LLM 结合上下文做最终判定"
+            )
+
+    with col_debug1:
+        if st.button("🔰 仅 DFA 扫描", width='stretch'):
+            progress = st.progress(0, text="DFA 扫描中...")
+            _dfa_scan_all(all_data, dataset_id, progress_placeholder=progress)
+            progress.empty()
+            st.success("DFA 扫描完成")
+
+    with col_debug2:
+        if st.button("🤖 仅 LLM 扫描", disabled=not api_ready, width='stretch'):
+            df = get_all_results()
+            pre_scan = {row['text_id']: safe_json_loads(row['hit_words'])
+                        for _, row in df[df['text_id'].isin(current_ids)].iterrows()}
+            progress_bar = st.progress(0)
+            tasks = [(llm_scan, (rec['text'], api_key, base_url, llm_model, pre_scan.get(rec['id'])))
+                     for rec in all_data]
+            llm_results = run_concurrently(
+                tasks, max_workers=concurrency,
+                progress_placeholder=progress_bar, progress_text="LLM 扫描中"
+            )
+            for i, (rec, res) in enumerate(zip(all_data, llm_results)):
+                true_label = 1 if rec.get('is_toxic') else 0
+                if isinstance(res, Exception):
+                    update_llm_result(rec['id'], -1, 0, [], '')
+                else:
+                    llm_pred = int(res.get('is_toxic', False))
+                    llm_time = res.get('time_cost', 0)
+                    llm_spans = res.get('toxic_spans', [])
+                    category = res.get('category', '隐性偏颇')
+                    reason_text = res.get('reason', '')
+                    llm_reason = f'[{category}]：{reason_text}' if llm_pred == 1 else ''
+                    existing_row = df[df['text_id'] == rec['id']]
+                    dfa_pred = existing_row['dfa_pred'].values[0] if not existing_row.empty else -1
+                    dfa_hit_words = safe_json_loads(existing_row['hit_words'].values[0]) if not existing_row.empty else []
+                    save_result(rec['id'], true_label, dfa_pred, llm_pred, dfa_hit_words, 0, llm_time, llm_spans,
+                                llm_reason=llm_reason, dataset_id=dataset_id, text=rec.get('text', ''))
+            st.success("LLM 扫描完成")
+
+    # ----- 结果展示 -----
+    df_all = get_all_results()
+    df_all = _render_status_table(df_all, current_ids)
+
+    # CSV 导出按钮
+    if not df_all.empty:
+        csv = df_all.to_csv(index=False)
+        st.download_button("📥 导出 CSV", data=csv,
+                           file_name=f"{dataset_id.replace('.jsonl', '')}_results.csv",
+                           mime="text/csv")
+
+    _render_batch_highlight(df_all, all_data)
+    _render_detail_view(df_all, all_data)
+
+
+========================================
+ 文件: views/tab3_analysis.py
+ 路径: /home/ckc/projects/sentinel-edu/views/tab3_analysis.py
+ 行数: 277
+========================================
+
+"""Tab 3: 可视化分析 — 混淆矩阵指标 + 详细图表"""
+
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import io
+import os
+
+from core.database import get_all_results, get_results_by_dataset, get_dataset_ids
+from core.utils import load_jsonl
+
+
+def _load_strategy_map(dataset_id):
+    """从 JSONL 文件中加载 text_id -> attack_strategy 映射"""
+    candidates = [
+        os.path.join('data', 'datasets', dataset_id),
+        os.path.join('data', dataset_id),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            data = load_jsonl(path)
+            return {r['id']: r.get('attack_strategy', '无毒') for r in data}
+    return {}
+
+
+def render_tab3():
+    st.header("检测结果统计")
+    df = get_all_results()
+    if df.empty:
+        st.warning("暂无检测数据，请先运行检测")
+        return
+
+    current_ids = st.session_state.get('_tab2_current_ids', None)
+    dataset_id = st.session_state.get('_current_dataset_id', None)
+
+    if current_ids is not None:
+        df = df[df['text_id'].isin(current_ids)].copy()
+    elif dataset_id is not None:
+        df = df[df['dataset_id'] == dataset_id].copy()
+        if df.empty:
+            df_alt = get_results_by_dataset(dataset_id)
+            if not df_alt.empty:
+                df = df_alt
+    else:
+        all_ids = get_dataset_ids()
+        if all_ids:
+            choice = st.selectbox("选择要分析的数据集", all_ids)
+            if choice:
+                df = get_results_by_dataset(choice)
+                if df.empty:
+                    df = get_all_results()
+                    df = df[df['dataset_id'] == choice].copy()
+        else:
+            df = df.copy()
+
+    if df.empty:
+        st.info("暂无当前文件的检测数据，请先运行扫描")
+        return
+
+    # 强制转为数值类型
+    df['dfa_pred'] = pd.to_numeric(df['dfa_pred'], errors='coerce').fillna(-1).astype(int)
+    df['llm_pred'] = pd.to_numeric(df['llm_pred'], errors='coerce').fillna(-1).astype(int)
+    df['true_label'] = pd.to_numeric(df['true_label'], errors='coerce').fillna(0).astype(int)
+    df['dfa_time'] = pd.to_numeric(df['dfa_time'], errors='coerce').fillna(0)
+    df['llm_time'] = pd.to_numeric(df['llm_time'], errors='coerce').fillna(0)
+
+    df['final_pred'] = ((df['dfa_pred'] == 1) | (df['llm_pred'] == 1)).astype(int)
+
+    # 加载策略映射
+    strategy_map = _load_strategy_map(dataset_id) if dataset_id else {}
+    if strategy_map:
+        df['attack_strategy'] = df['text_id'].map(strategy_map).fillna('未知')
+
+    # 区分已扫描和未扫描样本
+    scanned = df[(df['dfa_pred'] != -1) | (df['llm_pred'] != -1)]
+    unscanned = len(df) - len(scanned)
+    total = len(df)
+
+    # ========== 核心指标 ==========
+    if len(scanned) > 0:
+        tp = len(scanned[(scanned['true_label'] == 1) & (scanned['final_pred'] == 1)])
+        tn = len(scanned[(scanned['true_label'] == 0) & (scanned['final_pred'] == 0)])
+        fp = len(scanned[(scanned['true_label'] == 0) & (scanned['final_pred'] == 1)])
+        fn = len(scanned[(scanned['true_label'] == 1) & (scanned['final_pred'] == 0)])
+
+        accuracy = (tp + tn) / len(scanned) if len(scanned) > 0 else 0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+        fnr = fn / (tp + fn) if (tp + fn) > 0 else 0
+        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
+
+        # 时间统计
+        dfa_scanned = scanned[scanned['dfa_pred'] != -1]
+        llm_scanned = scanned[scanned['llm_pred'] != -1]
+        avg_dfa_time = dfa_scanned['dfa_time'].mean() if len(dfa_scanned) > 0 else 0
+        avg_llm_time = llm_scanned['llm_time'].mean() if len(llm_scanned) > 0 else 0
+        total_time = scanned['dfa_time'].sum() + scanned['llm_time'].sum()
+
+        st.subheader("核心指标")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("总样本", total, delta=f"{unscanned} 未扫描" if unscanned else None)
+        col2.metric("正确拦截 (TP)", tp)
+        col3.metric("漏报 (FN)", fn)
+        col4.metric("误报 (FP)", fp)
+
+        col5, col6, col7, col8 = st.columns(4)
+        col5.metric("准确率 (Accuracy)", f"{accuracy:.1%}")
+        col6.metric("召回率 (Recall)", f"{recall:.1%}")
+        col7.metric("精确率 (Precision)", f"{precision:.1%}")
+        col8.metric("F1 Score", f"{f1:.3f}")
+
+        col9, col10, col11, col12 = st.columns(4)
+        col9.metric("漏报率 (FNR)", f"{fnr:.1%}")
+        col10.metric("误报率 (FPR)", f"{fpr:.1%}")
+        col11.metric("真阴性 (TN)", tn)
+        col12.metric("已检测样本", len(scanned))
+
+        # 耗时指标
+        st.subheader("检测耗时")
+        tc1, tc2, tc3, tc4 = st.columns(4)
+        tc1.metric("DFA 平均耗时", f"{avg_dfa_time:.3f}s")
+        tc2.metric("LLM 平均耗时", f"{avg_llm_time:.1f}s")
+        tc3.metric("总耗时", f"{total_time:.1f}s")
+        tc4.metric("已检测", f"{len(scanned)} 条")
+
+        # ========== 混淆矩阵热力图 ==========
+        st.markdown("---")
+        st.subheader("混淆矩阵")
+        cm = [[tn, fp], [fn, tp]]
+        fig_cm = px.imshow(
+            cm,
+            x=['预测安全', '预测有毒'],
+            y=['真实安全', '真实有毒'],
+            text_auto=True,
+            color_continuous_scale='Reds',
+            title="双防联合判定混淆矩阵",
+            labels=dict(x="预测类别", y="真实类别", color="样本数"),
+        )
+        st.plotly_chart(fig_cm, width='stretch')
+
+        # ========== 双防独立指标对比 ==========
+        st.markdown("---")
+        st.subheader("双防独立指标对比")
+
+        def calc_metrics(true_labels, preds):
+            """计算准确率、召回率、精确率、F1"""
+            _tp = sum(1 for t, p in zip(true_labels, preds) if t == 1 and p == 1)
+            _tn = sum(1 for t, p in zip(true_labels, preds) if t == 0 and p == 0)
+            _fp = sum(1 for t, p in zip(true_labels, preds) if t == 0 and p == 1)
+            _fn = sum(1 for t, p in zip(true_labels, preds) if t == 1 and p == 0)
+            _acc = (_tp + _tn) / len(true_labels) if true_labels else 0
+            _rec = _tp / (_tp + _fn) if (_tp + _fn) > 0 else 0
+            _prec = _tp / (_tp + _fp) if (_tp + _fp) > 0 else 0
+            _f1 = 2 * _prec * _rec / (_prec + _rec) if (_prec + _rec) > 0 else 0
+            return _acc, _rec, _prec, _f1
+
+        dfa_valid = scanned[scanned['dfa_pred'] != -1]
+        llm_valid = scanned[scanned['llm_pred'] != -1]
+
+        dfa_acc, dfa_rec, dfa_prec, dfa_f1 = calc_metrics(
+            dfa_valid['true_label'].tolist(), dfa_valid['dfa_pred'].tolist()) if len(dfa_valid) > 0 else (0, 0, 0, 0)
+        llm_acc, llm_rec, llm_prec, llm_f1 = calc_metrics(
+            llm_valid['true_label'].tolist(), llm_valid['llm_pred'].tolist()) if len(llm_valid) > 0 else (0, 0, 0, 0)
+
+        fig_comp = go.Figure(data=[
+            go.Bar(name='一防 DFA', x=['准确率', '召回率', '精确率', 'F1'],
+                   y=[dfa_acc, dfa_rec, dfa_prec, dfa_f1],
+                   text=[f'{v:.1%}' for v in [dfa_acc, dfa_rec, dfa_prec, dfa_f1]],
+                   textposition='outside'),
+            go.Bar(name='二防 LLM', x=['准确率', '召回率', '精确率', 'F1'],
+                   y=[llm_acc, llm_rec, llm_prec, llm_f1],
+                   text=[f'{v:.1%}' for v in [llm_acc, llm_rec, llm_prec, llm_f1]],
+                   textposition='outside'),
+        ])
+        fig_comp.update_layout(
+            title="DFA vs LLM 独立指标对比",
+            yaxis=dict(range=[0, 1.1], tickformat='.0%'),
+            barmode='group',
+        )
+        st.plotly_chart(fig_comp, width='stretch')
+
+        # DFA / LLM 单独指标卡片
+        cm1, cm2, cm3, cm4 = st.columns(4)
+        cm1.metric("DFA 准确率", f"{dfa_acc:.1%}")
+        cm2.metric("DFA 召回率", f"{dfa_rec:.1%}")
+        cm3.metric("LLM 准确率", f"{llm_acc:.1%}")
+        cm4.metric("LLM 召回率", f"{llm_rec:.1%}")
+
+        # ========== 攻击策略维度分析 ==========
+        if strategy_map:
+            st.markdown("---")
+            st.subheader("攻击策略维度分析")
+            toxic_df = scanned[scanned['true_label'] == 1].copy()
+            if not toxic_df.empty and 'attack_strategy' in toxic_df.columns:
+                strategies = toxic_df['attack_strategy'].unique()
+                strat_records = []
+                for s in strategies:
+                    subset = toxic_df[toxic_df['attack_strategy'] == s]
+                    s_tp = len(subset[subset['final_pred'] == 1])
+                    s_fn = len(subset[subset['final_pred'] == 0])
+                    s_total = len(subset)
+                    s_recall = s_tp / s_total if s_total > 0 else 0
+                    s_miss = s_fn / s_total if s_total > 0 else 0
+                    strat_records.append({
+                        '攻击策略': s if s else '无毒',
+                        '有毒样本数': s_total,
+                        '正确拦截': s_tp,
+                        '漏报': s_fn,
+                        '召回率': f'{s_recall:.1%}',
+                        '漏报率': f'{s_miss:.1%}',
+                    })
+                strat_df = pd.DataFrame(strat_records)
+                st.dataframe(strat_df, width='stretch', hide_index=True)
+
+                fig_strat = go.Figure(data=[
+                    go.Bar(name='正确拦截', x=strat_df['攻击策略'], y=strat_df['正确拦截'],
+                           marker_color='#4caf50'),
+                    go.Bar(name='漏报', x=strat_df['攻击策略'], y=strat_df['漏报'],
+                           marker_color='#f44336'),
+                ])
+                fig_strat.update_layout(
+                    title="各攻击策略检测效果",
+                    barmode='stack',
+                    yaxis=dict(title='样本数'),
+                )
+                st.plotly_chart(fig_strat, width='stretch')
+
+        # ========== 防御管线漏斗图 ==========
+        st.markdown("---")
+        st.subheader("防御管线流程")
+        dfa_hit = int((scanned['dfa_pred'] == 1).sum())
+        llm_hit = int((scanned['llm_pred'] == 1).sum())
+        final_hit = int((scanned['final_pred'] == 1).sum())
+
+        funnel_fig = go.Figure(go.Funnel(
+            y=['总样本', 'DFA 命中', 'LLM 命中', '最终拦截'],
+            x=[total, dfa_hit, llm_hit, final_hit],
+            textinfo="value+percent previous",
+        ))
+        funnel_fig.update_layout(title="双防拦截漏斗")
+        st.plotly_chart(funnel_fig, width='stretch')
+
+        # ========== 标签分布饼图 + 防火墙柱状图 ==========
+        st.markdown("---")
+        col_pie, col_bar = st.columns(2)
+        with col_pie:
+            fig1 = px.pie(
+                names=['有毒', '无毒'],
+                values=[int(df['true_label'].sum()), total - int(df['true_label'].sum())],
+                title="测试集真实标签分布"
+            )
+            st.plotly_chart(fig1, width='stretch')
+        with col_bar:
+            fig2 = px.bar(
+                x=['一防 DFA', '二防 LLM', '联合判定'],
+                y=[dfa_hit, llm_hit, final_hit],
+                labels={'x': '防火墙', 'y': '命中数'},
+                title="防火墙拦截数量对比",
+                text_auto=True,
+            )
+            st.plotly_chart(fig2, width='stretch')
+
+    else:
+        st.info(f"共 {total} 条样本，均未检测。请先运行扫描。")
+
+    # ========== Excel 导出 ==========
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='扫描结果')
+    st.download_button("📥 导出 Excel", data=buf.getvalue(),
+                       file_name=f"{dataset_id.replace('.jsonl', '') if dataset_id else 'scan'}_results.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    with st.expander("查看完整数据库记录"):
+        st.dataframe(df)
+
+
+========================================
+ 文件: views/tab4_learn.py
+ 路径: /home/ckc/projects/sentinel-edu/views/tab4_learn.py
+ 行数: 111
+========================================
+
+"""Tab 4: 自学习优化 — LLM 检出 → 候选词提取 → DFA 词库扩充"""
+
+import streamlit as st
+from core.self_learner import (
+    collect_missed_spans, segment_candidates, score_candidates,
+    deduplicate, get_existing_words, get_context_examples, apply_selected,
+)
+from core.dfa_scanner import DFAScanner
+
+
+def render_tab4():
+    st.header("自学习优化 — DFA 词库扩充")
+
+    st.markdown("""
+    从 LLM（二防）检出但 DFA（一防）漏掉的记录中，自动提取候选敏感词，
+    经人工审核后追加到 `sensitive_words.txt`，提升一防覆盖率。
+    """)
+
+    # Step 1: 收集漏报数据
+    st.subheader("步骤1：收集 LLM 检出但 DFA 漏报的记录")
+    if st.button("📊 查询漏报数据"):
+        spans, texts, count = collect_missed_spans()
+        if count == 0:
+            st.warning("没有找到 LLM 检出但 DFA 漏掉的记录。请先运行双重检测。")
+            return
+        st.session_state['_learn_spans'] = spans
+        st.session_state['_learn_texts'] = texts
+        st.session_state['_learn_count'] = count
+        st.success(f"找到 {count} 条 DFA 漏报记录，共 {len(spans)} 个检出片段")
+
+    if '_learn_spans' not in st.session_state:
+        st.info("👆 请先点击上方按钮查询漏报数据")
+        return
+
+    spans = st.session_state['_learn_spans']
+    texts = st.session_state['_learn_texts']
+    count = st.session_state['_learn_count']
+    st.caption(f"已加载 {count} 条漏报记录，{len(spans)} 个检出片段")
+
+    # Step 2: 分析候选词
+    st.markdown("---")
+    st.subheader("步骤2：提取候选敏感词")
+    if st.button("🔬 分析候选词"):
+        existing = get_existing_words()
+        candidates = segment_candidates(spans, existing)
+        if not candidates:
+            st.warning("未提取到有效候选词（所有片段已被现有词库覆盖或为无效词）")
+            return
+        scored = score_candidates(candidates, texts)
+        deduped = deduplicate(scored)
+        st.session_state['_learn_candidates'] = deduped
+        st.success(f"提取到 {len(deduped)} 个候选词（已去重排序）")
+
+    if '_learn_candidates' not in st.session_state:
+        st.info("👆 请点击上方按钮分析候选词")
+        return
+
+    candidates = st.session_state['_learn_candidates']
+    if not candidates:
+        return
+
+    # Step 3: 人工审核
+    st.markdown("---")
+    st.subheader("步骤3：审核并追加到敏感词库")
+    st.caption(f"共 {len(candidates)} 个候选词，按 TF-IDF 辨别力降序排列。勾选要加入词库的词。")
+
+    # 展示候选词表格
+    rows = []
+    for c in candidates[:50]:
+        examples = get_context_examples(c['word'], texts)
+        ctx_str = ' | '.join(examples[:2]) if examples else '—'
+        rows.append({
+            '选择': False,
+            '候选词': c['word'],
+            'TF-IDF': c['score'],
+            '出现次数': c['count'],
+            '上下文示例': ctx_str[:120],
+        })
+
+    edited = st.data_editor(
+        rows,
+        column_config={
+            '选择': st.column_config.CheckboxColumn(default=False),
+            'TF-IDF': st.column_config.NumberColumn(format="%.1f"),
+            '上下文示例': st.column_config.TextColumn(width='large'),
+        },
+        hide_index=True,
+        height=400,
+        key='candidate_editor',
+    )
+
+    selected = [r['候选词'] for r in edited if r['选择']]
+
+    if selected:
+        st.info(f"已勾选 {len(selected)} 个候选词")
+
+        if st.button("➕ 追加到敏感词库", type="primary"):
+            added_count, new_words = apply_selected(selected)
+            if added_count > 0:
+                # 重载 DFA Scanner 使新词立即生效，无需重启应用
+                DFAScanner('sensitive_words.txt').reload()
+                st.success(f"已添加 {added_count} 个新词到 sensitive_words.txt，词库已重载生效")
+                with st.expander("查看新增词汇"):
+                    st.write(new_words)
+                # 清理 session 状态以便重新分析
+                for k in ['_learn_spans', '_learn_texts', '_learn_count', '_learn_candidates']:
+                    st.session_state.pop(k, None)
+            else:
+                st.info("所选词汇已全部存在于词库中，无需添加")
+    else:
+        st.caption("👆 请勾选上方候选词，然后点击追加按钮")
+
+

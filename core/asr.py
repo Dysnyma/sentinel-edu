@@ -5,10 +5,7 @@ import os
 import warnings
 from pathlib import Path
 from urllib.parse import urlparse
-
-# ----- 本地 Whisper 模型单例 -----
-_local_model = None
-_local_model_name = "base"
+import streamlit as st
 
 
 def is_whisper_model_downloaded(model_name="base"):
@@ -18,12 +15,9 @@ def is_whisper_model_downloaded(model_name="base"):
     return os.path.exists(model_file)
 
 
+@st.cache_resource
 def get_local_whisper_model(model_name="base"):
-    global _local_model, _local_model_name
-    if _local_model is None or _local_model_name != model_name:
-        _local_model = whisper.load_model(model_name)
-        _local_model_name = model_name
-    return _local_model
+    return whisper.load_model(model_name)
 
 
 def _trim_overlap(prev: str, curr: str, min_match: int = 2, max_window: int = 60) -> str:
