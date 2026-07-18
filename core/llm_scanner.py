@@ -1,7 +1,6 @@
-import openai
-import json_repair
-import re
 import time
+
+from core.llm_client import BaseLLMClient
 
 SCAN_PROMPT = """你是一个严格的教学内容安全审核专家。请对以下文本进行安全评估。
 
@@ -18,11 +17,7 @@ SCAN_PROMPT = """你是一个严格的教学内容安全审核专家。请对以
 
 
 def llm_scan(text: str, api_key: str, base_url: str, model: str, dfa_words: list = None) -> dict:
-    base_url = base_url.strip().rstrip('/')
-    if not base_url.endswith('/v1'):
-        base_url += '/v1'
-
-    client = openai.OpenAI(api_key=api_key, base_url=base_url)
+    client = BaseLLMClient(api_key, base_url, model)
     t_start = time.time()
 
     if dfa_words:
@@ -35,56 +30,11 @@ def llm_scan(text: str, api_key: str, base_url: str, model: str, dfa_words: list
     else:
         dfa_hint = "前置关键词扫描（DFA）未发现敏感词，请重点检查是否存在隐性违规。"
 
-    def _call_api():
-        return client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "你是内容安全审核专家，只输出 JSON。"},
-                {"role": "user", "content": SCAN_PROMPT.replace('{dfa_hint}', dfa_hint).replace('{text}', text)}
-            ],
-            temperature=0.0,
-            max_tokens=512,
-            timeout=30
-        )
+    messages = [
+        {"role": "system", "content": "你是内容安全审核专家，只输出 JSON。"},
+        {"role": "user", "content": SCAN_PROMPT.replace('{dfa_hint}', dfa_hint).replace('{text}', text)},
+    ]
 
-    last_exc = None
-    for attempt in range(3):
-        try:
-            resp = _call_api()
-            last_exc = None
-            break
-        except (openai.APIStatusError, openai.APITimeoutError, openai.APIConnectionError) as e:
-            last_exc = e
-            if attempt < 2:
-                time.sleep(2 ** attempt)
-
-    if last_exc:
-        raise ValueError(f"LLM 扫描 API 失败（重试3次后）: {last_exc}") from last_exc
-
-    try:
-        # 防御：兼容部分代理/网关直接返回字符串的情况
-        if isinstance(resp, str):
-            raise ValueError(f"API 返回了字符串而非标准响应对象（可能 base_url 指向了网页地址）。内容预览: {resp[:200]}")
-        if not hasattr(resp, 'choices'):
-            raise ValueError(
-                f"API 返回异常：model={model}, base_url={base_url}, "
-                f"响应类型={type(resp).__name__}，缺少 choices 字段"
-            )
-        content = resp.choices[0].message.content
-        if content is None:
-            raise ValueError("API 返回内容为空")
-        content = content.strip()
-    except ValueError:
-        raise
-    except Exception as e:
-        raise ValueError(f"LLM 扫描 API 失败: {e}") from e
-    content = re.sub(r'^```(?:json)?\s*', '', content)
-    content = re.sub(r'\s*```$', '', content)
-
-    try:
-        result = json_repair.loads(content)
-    except Exception:
-        raise ValueError(f"无法解析 LLM 返回的 JSON。\n{content[:300]}")
-
+    result = client.call_and_parse(messages, temperature=0.0, max_tokens=512, timeout=30)
     result['time_cost'] = time.time() - t_start
     return result
