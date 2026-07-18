@@ -1,7 +1,7 @@
 ========================================
  Sentinel Edu — 全部 Python 源码合并
- 生成时间: 2026-07-18 15:41:39
- 文件总数: 17
+ 生成时间: 2026-07-18 22:06:47
+ 文件总数: 20
 ========================================
 
 ========================================
@@ -154,7 +154,7 @@ with tab4:
 ========================================
  文件: core/asr.py
  路径: /home/ckc/projects/sentinel-edu/core/asr.py
- 行数: 170
+ 行数: 164
 ========================================
 
 import openai
@@ -164,10 +164,7 @@ import os
 import warnings
 from pathlib import Path
 from urllib.parse import urlparse
-
-# ----- 本地 Whisper 模型单例 -----
-_local_model = None
-_local_model_name = "base"
+import streamlit as st
 
 
 def is_whisper_model_downloaded(model_name="base"):
@@ -177,12 +174,9 @@ def is_whisper_model_downloaded(model_name="base"):
     return os.path.exists(model_file)
 
 
+@st.cache_resource
 def get_local_whisper_model(model_name="base"):
-    global _local_model, _local_model_name
-    if _local_model is None or _local_model_name != model_name:
-        _local_model = whisper.load_model(model_name)
-        _local_model_name = model_name
-    return _local_model
+    return whisper.load_model(model_name)
 
 
 def _trim_overlap(prev: str, curr: str, min_match: int = 2, max_window: int = 60) -> str:
@@ -330,14 +324,297 @@ def download_bilibili_video(url: str, bbdown_path='./BBDown') -> dict:
 
 
 ========================================
+ 文件: core/build_controller.py
+ 路径: /home/ckc/projects/sentinel-edu/core/build_controller.py
+ 行数: 272
+========================================
+
+"""测试集构建控制器 — 封装 tab1_build.py 中的非 UI 业务逻辑。
+
+职责边界：
+- 只处理数据：接受参数 → 执行业务逻辑 → 返回结果
+- 不依赖 ``streamlit``、不读写 ``st.session_state``
+- 耗时操通过可选的 ``progress_callback`` 回调报告进度
+"""
+
+import os
+import re
+import json
+import uuid
+import random
+import shutil
+import tempfile
+import time
+from pathlib import Path
+
+from core.asr import (
+    extract_audio_from_video,
+    transcribe_audio_api,
+    transcribe_audio_local,
+    download_bilibili_video,
+    is_whisper_model_downloaded,
+    get_local_whisper_model,
+)
+from core.text_correction import correct_text
+from core.poison_generator import generate_poison
+from core.utils import load_jsonl, save_dataset, _generate_dataset_title, texts_to_jsonl, merge_jsonl, run_concurrently
+
+
+def _split_sentences(text: str) -> list[str]:
+    """将文本按中英文标点分割为句子片段。"""
+    parts = re.split(r'[。！？；\.\?!;\n]+', text)
+    return [s.strip() for s in parts if s.strip()]
+
+
+# ---------------------------------------------------------------------------
+#  1. 上传文件 → ASR 转写
+# ---------------------------------------------------------------------------
+
+def process_uploaded_file(
+    file_bytes: bytes,
+    file_name: str,
+    *,
+    use_local: bool = True,
+    local_model: str = "base",
+    ffmpeg_path: str = "ffmpeg",
+    api_key: str = "",
+    base_url: str = "",
+    initial_prompt: str = "",
+    progress_callback=None,
+) -> str:
+    """处理上传的音视频文件：临时文件 → 音频提取 → ASR → 清理，返回转写文本。"""
+    suffix = Path(file_name).suffix
+    tmp_path = None
+    audio_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+
+        is_video = suffix.lower() in ['.mp4', '.flv', '.mkv', '.avi', '.mov', '.webm']
+        if is_video:
+            audio_path = extract_audio_from_video(tmp_path, ffmpeg_path)
+        else:
+            audio_path = tmp_path
+
+        if use_local:
+            if not is_whisper_model_downloaded(local_model):
+                pass  # 调用方自行展示下载提醒
+            get_local_whisper_model(local_model)
+            transcript = transcribe_audio_local(
+                audio_path,
+                model_name=local_model,
+                initial_prompt=initial_prompt,
+                progress_callback=progress_callback,
+            )
+        else:
+            transcript = transcribe_audio_api(
+                audio_path, api_key, base_url, initial_prompt,
+            )
+        return transcript
+    finally:
+        for p in {tmp_path, audio_path}:
+            if p and os.path.exists(p):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+
+# ---------------------------------------------------------------------------
+#  2. B站链接 → 字幕 / ASR 转写
+# ---------------------------------------------------------------------------
+
+def process_bilibili_url(
+    url: str,
+    *,
+    bbdown_path: str = "./BBDown",
+    ffmpeg_path: str = "ffmpeg",
+    use_local: bool = True,
+    local_model: str = "base",
+    api_key: str = "",
+    base_url: str = "",
+    initial_prompt: str = "",
+    progress_callback=None,
+) -> str:
+    """处理 B 站视频链接：BBDown → 有字幕读字幕 / 无字幕则 ASR，返回文本。"""
+    info = download_bilibili_video(url, bbdown_path)
+    if info.get('subtitle'):
+        subtitle_text = Path(info['subtitle']).read_text(encoding='utf-8')
+        return subtitle_text
+
+    if info.get('video'):
+        audio_path = extract_audio_from_video(info['video'], ffmpeg_path)
+        try:
+            if use_local:
+                get_local_whisper_model(local_model)
+                return transcribe_audio_local(
+                    audio_path,
+                    model_name=local_model,
+                    initial_prompt=initial_prompt,
+                    progress_callback=progress_callback,
+                )
+            else:
+                return transcribe_audio_api(audio_path, api_key, base_url, initial_prompt)
+        finally:
+            if os.path.exists(audio_path):
+                try:
+                    os.unlink(audio_path)
+                except OSError:
+                    pass
+
+    raise ValueError("BBDown 未找到视频或字幕文件，请检查链接是否有效")
+
+
+# ---------------------------------------------------------------------------
+#  3. 文本纠错
+# ---------------------------------------------------------------------------
+
+def run_text_correction(
+    texts: list[str],
+    api_key: str,
+    base_url: str,
+    model: str,
+    progress_callback=None,
+) -> tuple[list[str], list[tuple[int, str]]]:
+    """逐条调用 LLM 纠错。单条失败时保留原句并记录错误。
+
+    返回 (corrected_list, errors)：
+    - corrected_list: 与输入等长的纠错后文本列表
+    - errors: [(index, error_message), ...]
+    """
+    corrected = []
+    errors = []
+    total = len(texts)
+    for i, text in enumerate(texts):
+        try:
+            corr = correct_text(text, api_key, base_url, model)
+            corrected.append(corr)
+        except Exception as e:
+            corrected.append(text)  # 失败时保留原句
+            errors.append((i, str(e)))
+        if progress_callback:
+            progress_callback(i + 1, total)
+    return corrected, errors
+
+
+# ---------------------------------------------------------------------------
+#  4. 投毒生成（并发）
+# ---------------------------------------------------------------------------
+
+def run_poison_generation(
+    clean_path: str,
+    *,
+    poison_ratio: float = 0.3,
+    api_key: str = "",
+    base_url: str = "",
+    model: str = "",
+    concurrency: int = 6,
+    progress_callback=None,
+) -> dict:
+    """从 JSONL 按比例采样 → 并发投毒 → 合并打乱 → 保存。
+
+    返回 dict:
+    {
+        "poisoned_records": [...],    # 投毒成功的记录
+        "errors": [(idx, msg), ...],  # 失败的记录
+        "clean_path": str,           # 输入的无毒 JSONL 路径
+        "poison_path": str,          # 输出的有毒 JSONL 路径
+        "mixed_path": str,           # 合并后的混合 JSONL 路径
+    }
+    """
+    clean_data = load_jsonl(clean_path)
+    total = len(clean_data)
+    poison_count = max(1, int(total * poison_ratio))
+    selected = random.sample(clean_data, poison_count)
+
+    tasks = [(generate_poison, (rec['text'], api_key, base_url, model)) for rec in selected]
+    raw_results = run_concurrently(tasks, max_workers=concurrency)
+
+    poisoned_records = []
+    errors = []
+    for i, (rec, res) in enumerate(zip(selected, raw_results)):
+        if isinstance(res, Exception):
+            errors.append((i, str(res)))
+            continue
+        res['id'] = str(uuid.uuid4())[:8]
+        res.setdefault('original_text', rec['text'])
+        res.setdefault('attack_strategy', '未知')
+        poisoned_records.append(res)
+
+    # 写有毒 JSONL
+    poison_file = 'data/poisoned_corpus.jsonl'
+    with open(poison_file, 'w', encoding='utf-8') as f:
+        for rec in poisoned_records:
+            out = {
+                "id": rec['id'],
+                "text": rec.get('text', ''),
+                "original_text": rec.get('original_text', ''),
+                "is_toxic": True,
+                "toxic_spans": rec.get('toxic_spans', []),
+                "attack_strategy": rec.get('attack_strategy', ''),
+            }
+            f.write(json.dumps(out, ensure_ascii=False) + '\n')
+
+    # 合并打乱
+    mixed_path = 'data/final_test_mixed.jsonl'
+    merge_jsonl(clean_path, poison_file, mixed_path)
+
+    if progress_callback:
+        progress_callback(total, total)
+
+    return {
+        "poisoned_records": poisoned_records,
+        "errors": errors,
+        "clean_path": clean_path,
+        "poison_path": poison_file,
+        "mixed_path": mixed_path,
+    }
+
+
+# ---------------------------------------------------------------------------
+#  5. 数据集自动保存
+# ---------------------------------------------------------------------------
+
+def transcribe_and_save_dataset(
+    transcript: str,
+    api_key: str = "",
+    base_url: str = "",
+    model: str = "",
+) -> tuple[str, str]:
+    """ASR 完成后：分割句子 → 保存数据集 → 返回 (路径, 标题)。"""
+    sentences = _split_sentences(transcript)
+    if not sentences:
+        return "", ""
+    jsonl_path = 'data/raw_transcript.jsonl'
+    texts_to_jsonl(sentences, jsonl_path)
+    return save_dataset(jsonl_path, title=None, api_key=api_key, base_url=base_url, model=model)
+
+
+def save_corrected_dataset(
+    texts: list[str],
+    api_key: str = "",
+    base_url: str = "",
+    model: str = "",
+) -> tuple[str, str]:
+    """纠错完成后：保存无毒数据集 → 返回 (路径, 标题)。"""
+    jsonl_path = 'data/clean_corpus.jsonl'
+    texts_to_jsonl(texts, jsonl_path)
+    return save_dataset(jsonl_path, title=None, api_key=api_key, base_url=base_url, model=model)
+
+
+========================================
  文件: core/config.py
  路径: /home/ckc/projects/sentinel-edu/core/config.py
- 行数: 82
+ 行数: 89
 ========================================
 
 import streamlit as st
 import json
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 CONFIG_FILE = os.path.join('data', 'apiconfig.json')
 
@@ -362,8 +639,10 @@ def load_config_from_file():
             for key, value in config.items():
                 if value:  # 文件中非空的值才覆盖
                     st.session_state[key] = value
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError:
             pass
+        except OSError as e:
+            logger.warning("读取配置文件失败: %s", e)
 
 
 def init_config():
@@ -400,8 +679,8 @@ def save_session_state():
     try:
         with open(SESSION_STATE_FILE, 'w', encoding='utf-8') as f:
             json.dump(payload, f, ensure_ascii=False)
-    except OSError:
-        pass
+    except OSError as e:
+        logger.warning("保存会话状态失败: %s", e)
 
 
 def load_session_state():
@@ -415,8 +694,10 @@ def load_session_state():
             if k == '_tab2_current_ids' and isinstance(v, list):
                 v = set(v)
             st.session_state[k] = v
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError:
         pass
+    except OSError as e:
+        logger.warning("恢复会话状态失败: %s", e)
 
 
 ========================================
@@ -539,6 +820,211 @@ def get_dataset_ids():
     ids = [row[0] for row in c.fetchall()]
     conn.close()
     return ids
+
+
+========================================
+ 文件: core/detect_controller.py
+ 路径: /home/ckc/projects/sentinel-edu/core/detect_controller.py
+ 行数: 197
+========================================
+
+"""安全检测控制器 — 封装 tab2_detect.py 中的非 UI 业务逻辑。
+
+职责边界：
+- 只处理数据：接受参数 → 执行业务逻辑 → 返回结果
+- 不依赖 ``streamlit``、不读写 ``st.session_state``
+- 耗时操作通过可选的 ``progress_callback`` 回调报告进度
+"""
+
+from core.dfa_scanner import DFAScanner
+from core.llm_scanner import llm_scan
+from core.database import init_db, save_result, get_all_results, update_llm_result
+from core.utils import run_concurrently, load_jsonl
+
+
+# ---------------------------------------------------------------------------
+#  1. DB 初始化
+# ---------------------------------------------------------------------------
+
+def init_db_records(all_data: list[dict], dataset_id: str) -> int:
+    """为新样本插入初始记录，跳过已存在的 text_id。返回新增条数。"""
+    init_db()
+    existing_all = get_all_results()
+    already_in_db = set(existing_all['text_id']) if not existing_all.empty else set()
+    count = 0
+    for rec in all_data:
+        if rec['id'] in already_in_db:
+            continue
+        true_label = 1 if rec.get('is_toxic') else 0
+        try:
+            save_result(rec['id'], true_label, -1, -1, [], 0, 0, [],
+                        dataset_id=dataset_id, text=rec.get('text', ''))
+            count += 1
+        except Exception:
+            pass
+    return count
+
+
+# ---------------------------------------------------------------------------
+#  2. DFA 全量扫描
+# ---------------------------------------------------------------------------
+
+def dfa_scan_all(all_data: list[dict], dataset_id: str,
+                 progress_callback=None) -> dict:
+    """逐条 DFA 扫描并写库，返回 ``{text_id: (dfa_hit, dfa_words)}``。"""
+    scanner = DFAScanner('sensitive_words.txt')
+    results = {}
+    total = len(all_data)
+    for i, rec in enumerate(all_data):
+        text = rec['text']
+        dfa_hit, dfa_words = scanner.scan(text)
+        results[rec['id']] = (dfa_hit, dfa_words)
+        true_label = 1 if rec.get('is_toxic') else 0
+        reason = f'[显性敏感词]：命中关键词 "{", ".join(dfa_words)}"' if dfa_hit else None
+        save_result(rec['id'], true_label, int(dfa_hit), -1, dfa_words, 0, 0,
+                    llm_spans=None, llm_reason=reason,
+                    dataset_id=dataset_id, text=text)
+        if progress_callback:
+            progress_callback(i + 1, total)
+    return results
+
+
+# ---------------------------------------------------------------------------
+#  3. LLM 并发扫描（供"自动检测"主流程使用）
+# ---------------------------------------------------------------------------
+
+def llm_scan_candidates(
+    candidates: list[tuple[dict, list]],
+    api_key: str, base_url: str, model: str,
+    concurrency: int, dataset_id: str,
+    progress_callback=None,
+) -> list:
+    """并发执行 LLM 扫描并写库，返回每条 API 响应（异常时为 Exception 实例）。"""
+    tasks = [(llm_scan, (rec['text'], api_key, base_url, model, dfa_words))
+             for rec, dfa_words in candidates]
+    llm_results = run_concurrently(
+        tasks, max_workers=concurrency, progress_callback=progress_callback,
+    )
+    for (rec, dfa_words), res in zip(candidates, llm_results):
+        true_label = 1 if rec.get('is_toxic') else 0
+        if isinstance(res, Exception):
+            llm_pred, llm_spans, llm_time, llm_reason = -1, [], 0, ''
+        else:
+            llm_pred = int(res.get('is_toxic', False))
+            llm_spans = res.get('toxic_spans', [])
+            llm_time = res.get('time_cost', 0)
+            category = res.get('category', '隐性偏颇')
+            reason_text = res.get('reason', '')
+            llm_reason = f'[{category}]：{reason_text}' if llm_pred == 1 else ''
+        save_result(rec['id'], true_label, -1, llm_pred, None, 0, llm_time, llm_spans,
+                    llm_reason=llm_reason, dataset_id=dataset_id, text=rec.get('text', ''))
+    return llm_results
+
+
+# ---------------------------------------------------------------------------
+#  4. 仅 LLM 扫描（从 DB 读取 DFA 结果）
+# ---------------------------------------------------------------------------
+
+def llm_scan_only(
+    all_data: list[dict],
+    api_key: str, base_url: str, model: str,
+    concurrency: int, dataset_id: str,
+    progress_callback=None,
+) -> list:
+    """从 DB 读取已有 DFA 结果后，仅执行 LLM 扫描并写库。"""
+    df = get_all_results()
+    current_ids = {r['id'] for r in all_data}
+    pre_scan = {
+        row['text_id']: _safe_load_jsonl(row['hit_words'])
+        for _, row in df[df['text_id'].isin(current_ids)].iterrows()
+    }
+    tasks = [(llm_scan, (rec['text'], api_key, base_url, model, pre_scan.get(rec['id'])))
+             for rec in all_data]
+    llm_results = run_concurrently(
+        tasks, max_workers=concurrency, progress_callback=progress_callback,
+    )
+    for i, (rec, res) in enumerate(zip(all_data, llm_results)):
+        true_label = 1 if rec.get('is_toxic') else 0
+        if isinstance(res, Exception):
+            update_llm_result(rec['id'], -1, 0, [], '')
+        else:
+            llm_pred = int(res.get('is_toxic', False))
+            llm_time = res.get('time_cost', 0)
+            llm_spans = res.get('toxic_spans', [])
+            category = res.get('category', '隐性偏颇')
+            reason_text = res.get('reason', '')
+            llm_reason = f'[{category}]：{reason_text}' if llm_pred == 1 else ''
+            existing_row = df[df['text_id'] == rec['id']]
+            dfa_pred = existing_row['dfa_pred'].values[0] if not existing_row.empty else -1
+            dfa_hit_words = _safe_load_jsonl(
+                existing_row['hit_words'].values[0]) if not existing_row.empty else []
+            save_result(rec['id'], true_label, dfa_pred, llm_pred, dfa_hit_words,
+                        0, llm_time, llm_spans,
+                        llm_reason=llm_reason, dataset_id=dataset_id, text=rec.get('text', ''))
+    return llm_results
+
+
+# ---------------------------------------------------------------------------
+#  5. 单文本检测（直接输入）
+# ---------------------------------------------------------------------------
+
+def inline_detect(text: str, api_key: str = "", base_url: str = "",
+                  model: str = "") -> dict:
+    """对单条文本执行 DFA + LLM 扫描，返回统一的结果字典。
+
+    返回结构::
+        {
+            "dfa_hit": bool,
+            "dfa_words": list[str],
+            "llm_pred": int,       # -1 / 0 / 1
+            "llm_spans": list[str],
+            "llm_reason": str,
+            "llm_error": str | None,
+        }
+    """
+    scanner = DFAScanner('sensitive_words.txt')
+    dfa_hit, dfa_words = scanner.scan(text)
+
+    result = {
+        "dfa_hit": dfa_hit,
+        "dfa_words": dfa_words,
+        "llm_pred": -1,
+        "llm_spans": [],
+        "llm_reason": "",
+        "llm_error": None,
+    }
+
+    if api_key and base_url and model:
+        try:
+            llm_res = llm_scan(text, api_key, base_url, model, dfa_words)
+            result["llm_pred"] = int(llm_res.get('is_toxic', False))
+            result["llm_spans"] = llm_res.get('toxic_spans', [])
+            if result["llm_pred"] == 1:
+                category = llm_res.get('category', '隐性偏颇')
+                result["llm_reason"] = f"[{category}]：{llm_res.get('reason', '')}"
+        except Exception as e:
+            result["llm_error"] = str(e)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+#  辅助
+# ---------------------------------------------------------------------------
+
+def _safe_load_jsonl(value):
+    """安全解析 JSON 字符串，处理 pandas NaT/NaN/None。"""
+    import json
+    if value is None or isinstance(value, float):
+        return []
+    if not isinstance(value, (str, bytes, bytearray)):
+        return []
+    if not value.strip():
+        return []
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return []
 
 
 ========================================
@@ -754,15 +1240,140 @@ class DFAScanner:
 
 
 ========================================
- 文件: core/llm_scanner.py
- 路径: /home/ckc/projects/sentinel-edu/core/llm_scanner.py
- 行数: 87
+ 文件: core/llm_client.py
+ 路径: /home/ckc/projects/sentinel-edu/core/llm_client.py
+ 行数: 118
 ========================================
+
+"""LLM API 客户端基类 — 封装 URL 标准化、指数退避重试、响应提取与 JSON 解析。"""
 
 import openai
 import json_repair
 import re
 import time
+
+
+class BaseLLMClient:
+    """LLM API 客户端基类。
+
+    职责边界：
+    - 只负责网络层：发起请求、重试、提取 content、解析 JSON。
+    - messages 的组装（System/User 角色、Prompt 模板渲染）由业务方完成。
+    """
+
+    def __init__(self, api_key: str, base_url: str, model: str):
+        base_url = base_url.strip().rstrip('/')
+        if not base_url.endswith('/v1'):
+            base_url += '/v1'
+        self.base_url = base_url
+        self.model = model
+        self._client = openai.OpenAI(api_key=api_key.strip(), base_url=base_url)
+
+    # ------------------------------------------------------------------
+    #  内部方法
+    # ------------------------------------------------------------------
+
+    def _call_api(self, messages, *, temperature=0.0, max_tokens=512, timeout=30):
+        """带指数退避重试的 API 调用，返回原始响应对象。"""
+        last_exc = None
+        for attempt in range(3):
+            try:
+                return self._client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=timeout,
+                )
+            except openai.APIError as e:
+                last_exc = e
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+
+        extra = ""
+        if hasattr(last_exc, 'response'):
+            try:
+                extra = (
+                    f"\nHTTP状态: {last_exc.response.status_code}"
+                    f"\n响应体: {last_exc.response.text[:500]}"
+                )
+            except (AttributeError, TypeError):
+                pass
+        raise ValueError(
+            f"LLM API 调用失败（重试3次后）: model={self.model}, "
+            f"base_url={self.base_url}, 错误: {last_exc}{extra}"
+        ) from last_exc
+
+    @staticmethod
+    def _extract_content(resp) -> str:
+        """安全提取 ``choices[0].message.content``，含 ``model_dump()`` 降级。"""
+        try:
+            content = resp.choices[0].message.content
+        except (AttributeError, KeyError, IndexError):
+            try:
+                resp_dict = resp.model_dump() if hasattr(resp, 'model_dump') else dict(resp)
+                content = resp_dict['choices'][0]['message']['content']
+            except Exception as e:
+                raise ValueError(
+                    f"无法从 API 响应中提取消息内容: "
+                    f"响应类型={type(resp).__name__}, 响应摘要={str(resp)[:500]}"
+                ) from e
+        if content is None:
+            raise ValueError("API 返回的消息内容为空 (None)。")
+        return content.strip()
+
+    @staticmethod
+    def _clean_markdown_json_markers(text: str) -> str:
+        """去除 `````json`` 等 Markdown 标记，便于后续 JSON 解析。"""
+        text = re.sub(r'^```(?:json)?\s*', '', text)
+        text = re.sub(r'\s*```$', '', text)
+        return text.strip()
+
+    # ------------------------------------------------------------------
+    #  公开方法
+    # ------------------------------------------------------------------
+
+    def call(self, messages, *, temperature=0.0, max_tokens=512, timeout=30) -> str:
+        """发送组装好的 messages，返回纯文本响应（已 strip）。"""
+        resp = self._call_api(
+            messages, temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+        )
+        return self._extract_content(resp)
+
+    def call_and_parse(self, messages, *, temperature=0.0, max_tokens=512, timeout=30) -> dict:
+        """发送 messages，返回 ``json_repair`` 解析后的 ``dict``。
+
+        保证返回类型为 ``dict`` —— 当 LLM 返回了 JSON 字符串/数字等非对象
+        类型时，抛出 ``ValueError`` 而非让下游 ``.setdefault()`` 崩溃。
+        """
+        content = self.call(
+            messages, temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+        )
+        clean = self._clean_markdown_json_markers(content)
+        try:
+            result = json_repair.loads(clean)
+        except Exception:
+            raise ValueError(
+                f"无法解析 LLM 返回的 JSON:\n"
+                f"原始返回（前500字符）:\n{content[:500]}"
+            )
+        if not isinstance(result, dict):
+            raise ValueError(
+                f"LLM 返回了非对象 JSON（类型={type(result).__name__}），"
+                f"期望 dict。原始返回（前500字符）:\n{content[:500]}"
+            )
+        return result
+
+
+========================================
+ 文件: core/llm_scanner.py
+ 路径: /home/ckc/projects/sentinel-edu/core/llm_scanner.py
+ 行数: 40
+========================================
+
+import time
+
+from core.llm_client import BaseLLMClient
 
 SCAN_PROMPT = """你是一个严格的教学内容安全审核专家。请对以下文本进行安全评估。
 
@@ -779,11 +1390,7 @@ SCAN_PROMPT = """你是一个严格的教学内容安全审核专家。请对以
 
 
 def llm_scan(text: str, api_key: str, base_url: str, model: str, dfa_words: list = None) -> dict:
-    base_url = base_url.strip().rstrip('/')
-    if not base_url.endswith('/v1'):
-        base_url += '/v1'
-
-    client = openai.OpenAI(api_key=api_key, base_url=base_url)
+    client = BaseLLMClient(api_key, base_url, model)
     t_start = time.time()
 
     if dfa_words:
@@ -796,54 +1403,12 @@ def llm_scan(text: str, api_key: str, base_url: str, model: str, dfa_words: list
     else:
         dfa_hint = "前置关键词扫描（DFA）未发现敏感词，请重点检查是否存在隐性违规。"
 
-    def _call_api():
-        return client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "你是内容安全审核专家，只输出 JSON。"},
-                {"role": "user", "content": SCAN_PROMPT.replace('{dfa_hint}', dfa_hint).replace('{text}', text)}
-            ],
-            temperature=0.0,
-            max_tokens=512,
-            timeout=30
-        )
+    messages = [
+        {"role": "system", "content": "你是内容安全审核专家，只输出 JSON。"},
+        {"role": "user", "content": SCAN_PROMPT.replace('{dfa_hint}', dfa_hint).replace('{text}', text)},
+    ]
 
-    last_exc = None
-    for attempt in range(3):
-        try:
-            resp = _call_api()
-            last_exc = None
-            break
-        except (openai.APIStatusError, openai.APITimeoutError, openai.APIConnectionError) as e:
-            last_exc = e
-            if attempt < 2:
-                time.sleep(2 ** attempt)
-
-    if last_exc:
-        raise ValueError(f"LLM 扫描 API 失败（重试3次后）: {last_exc}") from last_exc
-
-    try:
-        # 防御：兼容部分代理/网关直接返回字符串的情况
-        if isinstance(resp, str):
-            raise ValueError(f"API 返回了字符串而非标准响应对象（可能 base_url 指向了网页地址）。内容预览: {resp[:200]}")
-        if not hasattr(resp, 'choices'):
-            raise ValueError(f"API 返回异常类型 {type(resp).__name__}，缺少 choices 字段")
-        content = resp.choices[0].message.content
-        if content is None:
-            raise ValueError("API 返回内容为空")
-        content = content.strip()
-    except ValueError:
-        raise
-    except Exception as e:
-        raise ValueError(f"LLM 扫描 API 失败: {e}") from e
-    content = re.sub(r'^```(?:json)?\s*', '', content)
-    content = re.sub(r'\s*```$', '', content)
-
-    try:
-        result = json_repair.loads(content)
-    except Exception:
-        raise ValueError(f"无法解析 LLM 返回的 JSON。\n{content[:300]}")
-
+    result = client.call_and_parse(messages, temperature=0.0, max_tokens=512, timeout=30)
     result['time_cost'] = time.time() - t_start
     return result
 
@@ -851,13 +1416,10 @@ def llm_scan(text: str, api_key: str, base_url: str, model: str, dfa_words: list
 ========================================
  文件: core/poison_generator.py
  路径: /home/ckc/projects/sentinel-edu/core/poison_generator.py
- 行数: 113
+ 行数: 39
 ========================================
 
-import openai
-import json_repair
-import re
-import time
+from core.llm_client import BaseLLMClient
 
 POISON_PROMPT = """你现在是一个网络安全红队专家，负责为教学内容安全防火墙生成测试靶场语料。
 请接收一段真实的课堂教学文本，并在保持上下文流畅的前提下，将其改写为具有安全隐患的文本。
@@ -879,85 +1441,14 @@ POISON_PROMPT = """你现在是一个网络安全红队专家，负责为教学�
 
 
 def generate_poison(text: str, api_key: str, base_url: str, model: str) -> dict:
-    base_url = base_url.strip().rstrip('/')
-    if not base_url.endswith('/v1'):
-        base_url += '/v1'
-    client = openai.OpenAI(api_key=api_key.strip(), base_url=base_url)
+    client = BaseLLMClient(api_key, base_url, model)
 
-    # 发送请求（带重试）：对所有 openai 异常统一重试，避免偶发网络抖动一次失败
-    last_exc = None
-    for attempt in range(3):
-        try:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "你是红队专家，只输出 JSON，不要任何解释。"},
-                    {"role": "user", "content": POISON_PROMPT.replace('{text}', text)}
-                ],
-                temperature=0.8,
-                max_tokens=1024,
-                timeout=60
-            )
-            last_exc = None
-            break
-        except openai.APIError as e:
-            # APIError 是所有 openai 库异常的基类（含超时、连接、限流、服务端错误），统一重试
-            last_exc = e
-            if attempt < 2:
-                time.sleep(2 ** attempt)
-        except Exception as e:
-            # 非网络/API 类异常（如参数错误）重试无意义，直接抛出
-            raise ValueError(
-                f"❌ 请求异常。\n"
-                f"Base URL: {base_url}\n"
-                f"模型: {model}\n"
-                f"异常类型: {type(e).__name__}\n"
-                f"异常信息: {str(e)}"
-            ) from e
+    messages = [
+        {"role": "system", "content": "你是红队专家，只输出 JSON，不要任何解释。"},
+        {"role": "user", "content": POISON_PROMPT.replace('{text}', text)},
+    ]
 
-    if last_exc is not None:
-        extra = ""
-        if hasattr(last_exc, 'response'):
-            try:
-                extra = f"\nHTTP状态: {last_exc.response.status_code}\n响应体: {last_exc.response.text[:500]}"
-            except (AttributeError, TypeError):
-                pass
-        raise ValueError(
-            f"❌ API 请求失败（重试3次后）。\n"
-            f"Base URL: {base_url}\n"
-            f"模型: {model}\n"
-            f"错误: {last_exc}{extra}"
-        ) from last_exc
-
-    # ===== 安全提取消息内容（兼容不同 openai 库版本）=====
-    try:
-        content = resp.choices[0].message.content
-    except (AttributeError, KeyError, IndexError) as e:
-        # 尝试将 response 转为字典再提取
-        try:
-            resp_dict = resp.model_dump() if hasattr(resp, 'model_dump') else dict(resp)
-            content = resp_dict['choices'][0]['message']['content']
-        except Exception as ex:
-            raise ValueError(
-                f"❌ 无法从 API 响应中提取消息内容。\n"
-                f"响应对象类型: {type(resp)}\n"
-                f"响应摘要: {str(resp)[:500]}\n"
-                f"原始错误: {e}"
-            ) from ex
-
-    if content is None:
-        raise ValueError("API 返回的消息内容为空 (None)。")
-
-    # ----- 使用 json_repair 修复并解析 JSON -----
-    clean = re.sub(r'^```(?:json)?\s*', '', content)
-    clean = re.sub(r'\s*```$', '', clean)
-    try:
-        result = json_repair.loads(clean)
-    except Exception:
-        raise ValueError(
-            f"❌ 无法解析 API 返回的 JSON。\n"
-            f"原始返回（前500字符）:\n{content[:500]}"
-        )
+    result = client.call_and_parse(messages, temperature=0.8, max_tokens=1024, timeout=60)
 
     # 补全缺失字段
     result.setdefault('original_text', text)
@@ -1147,10 +1638,10 @@ def apply_selected(selected_words, wordlist_path='sensitive_words.txt'):
 ========================================
  文件: core/text_correction.py
  路径: /home/ckc/projects/sentinel-edu/core/text_correction.py
- 行数: 30
+ 行数: 17
 ========================================
 
-import openai
+from core.llm_client import BaseLLMClient
 
 CORRECT_PROMPT = """你是一个专业的文本校对助手。以下文本是由语音识别（ASR）生成的大学思政课教学内容。由于语音识别误差，可能存在同音字、错别字或专业术语拼写错误。
 请你仅修复其中的错别字和标点符号，**绝对不要**改变原句的口语化表达、语气和句子结构。
@@ -1159,40 +1650,29 @@ CORRECT_PROMPT = """你是一个专业的文本校对助手。以下文本是由
 
 
 def correct_text(text: str, api_key: str, base_url: str, model: str) -> str:
-    base_url = base_url.strip().rstrip('/')
-    if not base_url.endswith('/v1'):
-        base_url += '/v1'
-    client = openai.OpenAI(api_key=api_key.strip(), base_url=base_url)
-    try:
-        resp = client.chat.completions.create(
-            model=model.strip(),
-            messages=[
-                {"role": "system", "content": "你是一个专业的文本校对助手，仅纠正错别字和标点符号，不得改变原句表达。"},
-                {"role": "user", "content": CORRECT_PROMPT.replace('{text}', text)}
-            ],
-            temperature=0.0,
-            max_tokens=1024,
-            timeout=30
-        )
-        result = resp.choices[0].message.content
-        if result is None:
-            raise ValueError("API 返回内容为空")
-        return result.strip()
-    except Exception as e:
-        raise ValueError(f"文本纠错失败: {e}") from e
+    client = BaseLLMClient(api_key, base_url, model)
+
+    messages = [
+        {"role": "system", "content": "你是一个专业的文本校对助手，仅纠正错别字和标点符号，不得改变原句表达。"},
+        {"role": "user", "content": CORRECT_PROMPT.replace('{text}', text)},
+    ]
+
+    return client.call(messages, temperature=0.0, max_tokens=1024, timeout=30)
 
 
 ========================================
  文件: core/utils.py
  路径: /home/ckc/projects/sentinel-edu/core/utils.py
- 行数: 155
+ 行数: 201
 ========================================
 
 import json
 import os
 import uuid
 import random
+import time
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def texts_to_jsonl(texts: list, output_path: str):
@@ -1283,15 +1763,14 @@ def save_dataset(jsonl_path, title, api_key=None, base_url=None, model=None):
 
 def _generate_dataset_title(jsonl_path, api_key, base_url, model):
     """调用 LLM 为数据集生成简短标题"""
-    import openai
+    from core.llm_client import BaseLLMClient
     data = load_jsonl(jsonl_path)
     # 采样前几条文本作为提示
     samples = [r.get('text', '')[:100] for r in data[:5] if r.get('text')]
     sample_text = '\n'.join(samples[:3])
 
-    client = openai.OpenAI(api_key=api_key, base_url=base_url)
-    resp = client.chat.completions.create(
-        model=model,
+    client = BaseLLMClient(api_key, base_url, model)
+    title = client.call(
         messages=[{
             "role": "user",
             "content": (
@@ -1301,9 +1780,8 @@ def _generate_dataset_title(jsonl_path, api_key, base_url, model):
             )
         }],
         max_tokens=20,
-        temperature=0.3
+        temperature=0.3,
     )
-    title = resp.choices[0].message.content
     if title:
         return title.strip().strip('"').strip("'")
     return '测试集'
@@ -1345,6 +1823,52 @@ def list_datasets():
     return datasets
 
 
+# ---------------------------------------------------------------------------
+#  并发工具（与 UI 无关，仅接受回调）
+# ---------------------------------------------------------------------------
+
+def run_concurrently(tasks, max_workers=6, progress_callback=None):
+    """并发执行任务列表，按输入顺序返回结果。
+
+    Parameters
+    ----------
+    tasks : list[tuple]
+        每个元素为 (func, args)，args 可为 tuple（位置参数）或 dict（关键字参数）。
+    max_workers : int
+        最大并发线程数。
+    progress_callback : callable, optional
+        每完成一个任务时回调 ``progress_callback(completed, total)``。
+
+    Returns
+    -------
+    list
+        与输入等长的结果列表。异常时对应位置为 ``Exception`` 实例。
+    """
+    results = [None] * len(tasks)
+    total = len(tasks)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_idx = {}
+        for idx, task in enumerate(tasks):
+            func, args = task[0], task[1] if len(task) > 1 else ()
+            if isinstance(args, dict):
+                future = executor.submit(func, **args)
+            else:
+                future = executor.submit(func, *args)
+            future_to_idx[future] = idx
+
+        completed = 0
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                results[idx] = future.result()
+            except Exception as e:
+                results[idx] = e
+            completed += 1
+            if progress_callback:
+                progress_callback(completed, total)
+    return results
+
+
 ========================================
  文件: views/__init__.py
  路径: /home/ckc/projects/sentinel-edu/views/__init__.py
@@ -1364,7 +1888,7 @@ from views.tab3_analysis import render_tab3
 ========================================
  文件: views/helpers.py
  路径: /home/ckc/projects/sentinel-edu/views/helpers.py
- 行数: 148
+ 行数: 132
 ========================================
 
 """共享 UI 辅助函数：高亮、上下文截取、颜色映射、JSON 安全解析等"""
@@ -1483,70 +2007,76 @@ def safe_json_loads(value):
         return []
 
 
-def run_concurrently(tasks, max_workers=6, progress_placeholder=None, progress_text=""):
-    """并发执行任务列表，返回结果列表（按输入顺序）。自动显示进度和预计剩余时间。"""
+def run_concurrently_ui(tasks, max_workers=6, progress_placeholder=None, progress_text=""):
+    """UI 版并发执行 — 包装 ``core.utils.run_concurrently`` 并更新 Streamlit 进度条。"""
     import time
-    results = [None] * len(tasks)
+    from core.utils import run_concurrently as _run
     t_start = time.time()
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_idx = {}
-        for idx, task in enumerate(tasks):
-            func, args = task[0], task[1] if len(task) > 1 else ()
-            if isinstance(args, dict):
-                future = executor.submit(func, **args)
-            else:
-                future = executor.submit(func, *args)
-            future_to_idx[future] = idx
 
-        completed = 0
-        total = len(tasks)
-        for future in as_completed(future_to_idx):
-            idx = future_to_idx[future]
-            try:
-                results[idx] = future.result()
-            except Exception as e:
-                results[idx] = e
-            completed += 1
-            if progress_placeholder is not None:
-                elapsed = time.time() - t_start
-                eta = (elapsed / completed) * (total - completed) if completed > 0 else 0
-                progress_placeholder.progress(
-                    completed / total,
-                    text=f"{progress_text} {completed}/{total} | 耗时 {elapsed:.0f}s | 预计剩余 {eta:.0f}s"
-                )
-    return results
+    def _callback(completed, total):
+        if progress_placeholder is not None:
+            elapsed = time.time() - t_start
+            eta = (elapsed / completed) * (total - completed) if completed > 0 else 0
+            progress_placeholder.progress(
+                completed / total,
+                text=f"{progress_text} {completed}/{total} | 耗时 {elapsed:.0f}s | 预计剩余 {eta:.0f}s"
+            )
+
+    return _run(tasks, max_workers=max_workers, progress_callback=_callback)
 
 
 ========================================
  文件: views/tab1_build.py
  路径: /home/ckc/projects/sentinel-edu/views/tab1_build.py
- 行数: 318
+ 行数: 348
 ========================================
 
-"""Tab 1: 测试集构建 — 输入 → ASR → 纠错 → 投毒 → JSONL"""
+"""Tab 1: 测试集构建 — 仅负责 Streamlit UI 组件渲染与 session_state 读写。"""
 
 import streamlit as st
 import os
-import tempfile
-import json
-import uuid
-import random
-import shutil
-from pathlib import Path
+import time
+import difflib
 
-from core.asr import extract_audio_from_video, transcribe_audio_api, transcribe_audio_local, download_bilibili_video, is_whisper_model_downloaded, get_local_whisper_model
-from core.text_correction import correct_text
-from core.poison_generator import generate_poison
-from core.utils import texts_to_jsonl, merge_jsonl, load_jsonl, save_dataset
-from views.helpers import highlight_toxic, run_concurrently
+from core.asr import is_whisper_model_downloaded
+from core.build_controller import (
+    process_uploaded_file,
+    process_bilibili_url,
+    run_text_correction,
+    run_poison_generation,
+    transcribe_and_save_dataset,
+    save_corrected_dataset,
+)
+from core.utils import texts_to_jsonl, save_dataset, load_jsonl
+from views.helpers import highlight_toxic
 
 
-def _split_sentences(text: str) -> list:
-    """将文本按中英文标点分割为句子片段"""
-    import re
-    # 按中英文句号、问号、感叹号、分号、换行分割
-    parts = re.split(r'[。！？；\.\?!;\n]+', text)
-    return [s.strip() for s in parts if s.strip()]
+def _highlight_diff(original: str, corrected: str) -> tuple[str, str]:
+    """用 difflib 逐字符对比原文与纠错后文本，返回 (原文字符串HTML, 纠正字符串HTML)。
+
+    删除内容用红色背景（``#ffcccc``），新增内容用绿色背景（``#ccffcc``），替换内容分
+    别标注。
+    """
+    if original == corrected:
+        return original, corrected
+
+    orig_html, corr_html = [], []
+    matcher = difflib.SequenceMatcher(None, original, corrected)
+    for op, i1, i2, j1, j2 in matcher.get_opcodes():
+        if op == 'equal':
+            seg = original[i1:i2]
+            orig_html.append(seg)
+            corr_html.append(seg)
+        elif op == 'replace':
+            orig_html.append(f'<span style="background:#ffcccc">{original[i1:i2]}</span>')
+            corr_html.append(f'<span style="background:#ccffcc">{corrected[j1:j2]}</span>')
+        elif op == 'delete':
+            orig_html.append(f'<span style="background:#ffcccc;text-decoration:line-through">{original[i1:i2]}</span>')
+            corr_html.append('<span style="background:#eee"> </span>')
+        elif op == 'insert':
+            orig_html.append('<span style="background:#eee"> </span>')
+            corr_html.append(f'<span style="background:#ccffcc">{corrected[j1:j2]}</span>')
+    return ''.join(orig_html), ''.join(corr_html)
 
 
 def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
@@ -1558,141 +2088,128 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
 
     prompt_text = "这是一堂关于马克思主义基本原理、毛泽东思想、邓小平理论、唯物辩证法、社会主义核心价值观的大学思政课。"
 
+    # ── 检测模型切换 ──────────────────────────────────────────────
+    if use_local_whisper and st.session_state.get('_last_model') != local_whisper_model:
+        st.session_state.pop('_last_file_id', None)
+        st.session_state.pop('asr_transcript', None)
+        st.session_state['_last_model'] = local_whisper_model
+
+    # ═══════════════════════════════════════════════════════════════
+    #  输入方式 1：上传音视频文件
+    # ═══════════════════════════════════════════════════════════════
     if input_method == "📁 上传音视频文件":
         uploaded_file = st.file_uploader(
             "上传音频或视频", type=["wav", "mp3", "m4a", "mp4", "flv", "mkv"])
         if uploaded_file:
             file_id = f"{uploaded_file.name}_{uploaded_file.size}"
-            # Only process if the file changed (avoid re-running on every widget interaction)
             if st.session_state.get('_last_file_id') != file_id:
                 st.session_state['_last_file_id'] = file_id
-                suffix = Path(uploaded_file.name).suffix
-                tmp_path = None
-                audio_path = None
-                try:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                        tmp.write(uploaded_file.read())
-                        tmp_path = tmp.name
-
-                    is_video = suffix.lower() in ['.mp4', '.flv', '.mkv', '.avi', '.mov', '.webm']
-                    with st.spinner("正在提取音频..." if is_video else "正在读取文件..."):
-                        if is_video:
-                            audio_path = extract_audio_from_video(
-                                tmp_path, st.session_state.ffmpeg_path)
-                        else:
-                            audio_path = tmp_path
-                    if is_video:
-                        st.success("音频提取成功")
-
-                    if use_local_whisper:
-                        if not is_whisper_model_downloaded(local_whisper_model):
+                file_bytes = uploaded_file.read()
+                is_video = uploaded_file.name.split('.')[-1].lower() in \
+                    ['mp4', 'flv', 'mkv', 'avi', 'mov', 'webm']
+                with st.spinner("正在提取音频..." if is_video else "正在读取文件..."):
+                    try:
+                        if use_local_whisper and not is_whisper_model_downloaded(local_whisper_model):
                             st.info(f"📥 首次使用需下载 Whisper {local_whisper_model} 模型（约500MB），请耐心等待...")
-                        with st.spinner(f"正在加载 Whisper {local_whisper_model} 模型到内存..."):
-                            get_local_whisper_model(local_whisper_model)
                         progress_bar = st.progress(0, text="正在语音转写... 0%")
 
                         def _update(pct):
                             progress_bar.progress(pct, text=f"正在语音转写... {pct * 100:.0f}%")
-                        transcript = transcribe_audio_local(
-                            audio_path, model_name=local_whisper_model, initial_prompt=prompt_text,
-                            progress_callback=_update)
+
+                        transcript = process_uploaded_file(
+                            file_bytes, uploaded_file.name,
+                            use_local=use_local_whisper,
+                            local_model=local_whisper_model,
+                            ffmpeg_path=st.session_state.ffmpeg_path,
+                            api_key=api_key,
+                            base_url=base_url,
+                            initial_prompt=prompt_text,
+                            progress_callback=_update if use_local_whisper else None,
+                        )
                         progress_bar.progress(1.0, text="转写完成")
                         st.success("转写完成")
-                    else:
-                        if not api_ready:
-                            st.error("未配置大模型 API 密钥，无法使用云端 ASR。请启用本地 Whisper。")
-                            st.stop()
-                        with st.spinner("云端 Whisper 转写中，请耐心等待..."):
-                            transcript = transcribe_audio_api(
-                                audio_path, api_key, base_url, prompt_text)
-                        st.success("转写完成")
+                        st.session_state['asr_transcript'] = transcript
+                    except Exception as e:
+                        st.error(f"处理文件失败：{e}")
+                        st.session_state.pop('_last_file_id', None)
 
-                    st.session_state['asr_transcript'] = transcript
-                except Exception as e:
-                    st.error(f"处理文件失败：{e}")
-                    st.session_state.pop('_last_file_id', None)
-                finally:
-                    for p in {tmp_path, audio_path}:
-                        if p and os.path.exists(p):
-                            try:
-                                os.unlink(p)
-                            except OSError:
-                                pass
+            if 'asr_transcript' in st.session_state:
+                edited = st.text_area(
+                    "转写结果（可手动编辑）", st.session_state['asr_transcript'],
+                    height=200, key="transcript_editor")
+                raw_texts = [s for s in edited.split('。') if s.strip()]
+            else:
+                st.info("切换模型后请重新上传文件进行转写")
 
-            # Show editable transcript (persists across re-runs)
-            default_transcript = st.session_state.get('asr_transcript', '')
-            edited = st.text_area(
-                "转写结果（可手动编辑）", default_transcript, height=200,
-                key="transcript_editor")
-            raw_texts = [s for s in _split_sentences(edited)]
-
+    # ═══════════════════════════════════════════════════════════════
+    #  输入方式 2：B站视频链接
+    # ═══════════════════════════════════════════════════════════════
     elif input_method == "🔗 B站视频链接":
         bili_url = st.text_input("B站视频地址")
         if bili_url and st.button("开始解析并下载"):
-            if not shutil.which(st.session_state.bbdown_path):
+            if not shutil_available():
                 st.error("BBDown 不可用，请检查安装")
             else:
                 with st.spinner("使用 BBDown 下载中..."):
                     try:
-                        info = download_bilibili_video(
-                            bili_url, st.session_state.bbdown_path)
-                        if info['subtitle']:
-                            sub_text = Path(info['subtitle']).read_text(
-                                encoding='utf-8')
-                            st.success("找到人工字幕，跳过语音转写")
-                            st.session_state['bili_transcript'] = sub_text
-                            raw_texts = [s for s in _split_sentences(sub_text)]
-                        elif info['video']:
-                            with st.spinner("无字幕，正在提取音频..."):
-                                audio_path = extract_audio_from_video(
-                                    info['video'], st.session_state.ffmpeg_path)
-                            st.success("音频提取成功")
-                            if use_local_whisper:
-                                if not is_whisper_model_downloaded(local_whisper_model):
-                                    st.info(f"📥 首次使用需下载 Whisper {local_whisper_model} 模型（约500MB），请耐心等待...")
-                                with st.spinner(f"正在加载 Whisper {local_whisper_model} 模型到内存..."):
-                                    get_local_whisper_model(local_whisper_model)
-                                progress_bar = st.progress(0, text="正在语音转写... 0%")
+                        if use_local_whisper and not is_whisper_model_downloaded(local_whisper_model):
+                            st.info(f"📥 首次使用需下载 Whisper {local_whisper_model} 模型（约500MB），请耐心等待...")
+                        progress_bar = st.progress(0, text="处理中... 0%")
 
-                                def _update2(pct):
-                                    progress_bar.progress(pct, text=f"正在语音转写... {pct * 100:.0f}%")
-                                transcript = transcribe_audio_local(
-                                    audio_path, model_name=local_whisper_model, initial_prompt=prompt_text,
-                                    progress_callback=_update2)
-                                progress_bar.progress(1.0, text="转写完成")
-                                st.success("转写完成")
-                            else:
-                                if not api_ready:
-                                    st.error("未配置 API 密钥，无法使用云端 ASR。请启用本地 Whisper。")
-                                    st.stop()
-                                with st.spinner("云端 Whisper 转写中，请耐心等待..."):
-                                    transcript = transcribe_audio_api(
-                                        audio_path, api_key, base_url, prompt_text)
-                                st.success("转写完成")
-                            st.session_state['bili_transcript'] = transcript
-                            raw_texts = [s for s in _split_sentences(transcript)]
-                        else:
-                            st.error("BBDown 未找到视频或字幕文件，请检查链接是否有效")
+                        def _update2(pct):
+                            progress_bar.progress(pct, text=f"处理中... {pct * 100:.0f}%")
+
+                        transcript = process_bilibili_url(
+                            bili_url,
+                            bbdown_path=st.session_state.bbdown_path,
+                            ffmpeg_path=st.session_state.ffmpeg_path,
+                            use_local=use_local_whisper,
+                            local_model=local_whisper_model,
+                            api_key=api_key,
+                            base_url=base_url,
+                            initial_prompt=prompt_text,
+                            progress_callback=_update2 if use_local_whisper else None,
+                        )
+                        progress_bar.progress(1.0, text="完成")
+                        st.success("处理完成")
+                        st.session_state['bili_transcript'] = transcript
                     except Exception as e:
                         st.error(f"处理失败：{e}")
-        # Show cached results outside the button block
         if st.session_state.get('bili_transcript'):
-            edited = st.text_area("字幕/转写内容", st.session_state['bili_transcript'], height=150,
-                                  key="bili_transcript_editor")
+            edited = st.text_area("字幕/转写内容", st.session_state['bili_transcript'],
+                                  height=150, key="bili_transcript_editor")
             if not raw_texts:
-                raw_texts = [s for s in _split_sentences(edited)]
+                raw_texts = [s for s in edited.split('。') if s.strip()]
 
+    # ═══════════════════════════════════════════════════════════════
+    #  输入方式 3：直接输入文本
+    # ═══════════════════════════════════════════════════════════════
     elif input_method == "✏️ 直接输入文本":
         manual_text = st.text_area("请输入课堂文本", height=200)
         if manual_text:
-            raw_texts = [s for s in _split_sentences(manual_text)]
+            raw_texts = [s for s in manual_text.split('。') if s.strip()]
 
     info_placeholder = st.empty()
     if raw_texts:
         st.session_state['raw_texts'] = raw_texts
         info_placeholder.info(f"已获取 {len(raw_texts)} 条文本片段")
 
-    # --- 步骤2：文本纠错（可选） ---
+    # ── ASR 完成后自动保存原始数据集 ──────────────────────────────
+    if st.session_state.get('asr_transcript') and not st.session_state.get('_raw_dataset_saved'):
+        try:
+            transcribe_and_save_dataset(
+                st.session_state['asr_transcript'],
+                api_key=api_key if api_ready else "",
+                base_url=base_url if api_ready else "",
+                model=llm_model if api_ready else "",
+            )
+        except Exception:
+            pass
+        st.session_state['_raw_dataset_saved'] = True
+
+    # ═══════════════════════════════════════════════════════════════
+    #  步骤2：文本纠错
+    # ═══════════════════════════════════════════════════════════════
     st.markdown("---")
     st.header("步骤2：文本纠错（可选）")
     has_raw = bool(st.session_state.get('raw_texts'))
@@ -1701,31 +2218,49 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
         if not api_ready:
             st.error("缺少 API 配置")
         else:
-            import time
-            corrected = []
-            total = len(st.session_state.raw_texts)
-            progress_bar = st.progress(0, text=f"文本纠错中... 0/{total}")
+            progress_bar = st.progress(0, text="文本纠错中... 0/0")
             t_start = time.time()
-            for i, text in enumerate(st.session_state.raw_texts):
-                try:
-                    corr = correct_text(text, api_key, base_url, llm_model)
-                    corrected.append(corr)
-                except Exception as e:
-                    st.warning(f"第{i}条纠错失败，保留原句：{e}")
-                    corrected.append(text)
+            total = len(st.session_state.raw_texts)
+
+            def _corr_update(done, total_):
                 elapsed = time.time() - t_start
-                eta = (elapsed / (i + 1)) * (total - i - 1) if i > 0 else 0
+                eta = (elapsed / done) * (total_ - done) if done > 0 else 0
                 progress_bar.progress(
-                    (i + 1) / total,
-                    text=f"文本纠错中... {i + 1}/{total} | 耗时 {elapsed:.0f}s | 预计剩余 {eta:.0f}s"
+                    done / total_,
+                    text=f"文本纠错中... {done}/{total_} | 耗时 {elapsed:.0f}s | 预计剩余 {eta:.0f}s"
                 )
+
+            corrected, errors = run_text_correction(
+                st.session_state.raw_texts, api_key, base_url, llm_model,
+                progress_callback=_corr_update,
+            )
             st.session_state['corrected_texts'] = corrected
             st.success(f"纠错完成，共 {total} 条，耗时 {time.time() - t_start:.0f}s")
+            for idx, msg in errors:
+                st.warning(f"第{idx}条纠错失败，保留原句：{msg}")
 
-    final_texts = st.session_state.get(
-        'corrected_texts', st.session_state.get('raw_texts', []))
+    # ── 纠错对比区域 ────────────────────────────────────────────
+    corrected = st.session_state.get('corrected_texts')
+    raw = st.session_state.get('raw_texts')
+    if corrected and raw and len(corrected) == len(raw):
+        with st.expander(f"📊 纠错前后对比（共 {len(corrected)} 条）"):
+            for i, (orig, corr) in enumerate(zip(raw, corrected)):
+                orig_html, corr_html = _highlight_diff(orig, corr)
+                st.markdown(f"**条目 {i + 1}**" + ("（无改动）" if orig == corr else ""))
+                col_l, col_r = st.columns(2)
+                with col_l:
+                    st.caption("原文")
+                    st.markdown(orig_html, unsafe_allow_html=True)
+                with col_r:
+                    st.caption("纠错后")
+                    st.markdown(corr_html, unsafe_allow_html=True)
+                st.markdown("---")
 
-    # --- 步骤3：生成无毒 JSONL ---
+    final_texts = st.session_state.get('corrected_texts', st.session_state.get('raw_texts', []))
+
+    # ═══════════════════════════════════════════════════════════════
+    #  步骤3：生成无毒 JSONL
+    # ═══════════════════════════════════════════════════════════════
     st.markdown("---")
     st.header("步骤3：生成无毒文本集（JSONL）")
     has_final = bool(final_texts)
@@ -1734,8 +2269,20 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
         texts_to_jsonl(final_texts, 'data/clean_corpus.jsonl')
         st.session_state['clean_jsonl'] = 'data/clean_corpus.jsonl'
         st.success(f"无毒文本已保存至 data/clean_corpus.jsonl，共 {len(final_texts)} 条")
+        # 自动保存纠错后数据集
+        try:
+            save_corrected_dataset(
+                final_texts,
+                api_key=api_key if api_ready else "",
+                base_url=base_url if api_ready else "",
+                model=llm_model if api_ready else "",
+            )
+        except Exception:
+            pass
 
-    # --- 步骤4：投毒生成 ---
+    # ═══════════════════════════════════════════════════════════════
+    #  步骤4：投毒生成
+    # ═══════════════════════════════════════════════════════════════
     st.markdown("---")
     st.header("步骤4：投毒生成有毒文本（红队测试）")
     clean_path = st.session_state.get('clean_jsonl')
@@ -1746,63 +2293,52 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
         if not api_ready:
             st.error("缺少 API 配置")
         else:
-            clean_data = load_jsonl(clean_path)
-            total = len(clean_data)
-            poison_count = max(1, int(total * poison_ratio))
-            selected = random.sample(clean_data, poison_count)
+            progress_bar = st.progress(0, text="投毒生成中...")
+            t_start = time.time()
 
-            tasks = [(generate_poison, (rec['text'], api_key,
-                      base_url, llm_model)) for rec in selected]
-            progress_bar = st.progress(0)
-            raw_results = run_concurrently(
-                tasks, max_workers=concurrency,
-                progress_placeholder=progress_bar, progress_text="投毒生成中"
+            def _poison_update(done, total_):
+                elapsed = time.time() - t_start
+                eta = (elapsed / done) * (total_ - done) if done > 0 else 0
+                progress_bar.progress(
+                    done / total_,
+                    text=f"投毒生成中 {done}/{total_} | 耗时 {elapsed:.0f}s | 预计剩余 {eta:.0f}s"
+                )
+
+            result = run_poison_generation(
+                clean_path,
+                poison_ratio=poison_ratio,
+                api_key=api_key,
+                base_url=base_url,
+                model=llm_model,
+                concurrency=concurrency,
+                progress_callback=_poison_update,
             )
+            progress_bar.progress(1.0, text="投毒完成")
 
-            poisoned_records = []
-            for i, (rec, res) in enumerate(zip(selected, raw_results)):
-                if isinstance(res, Exception):
-                    st.warning(f"第{i}条投毒失败")
-                    with st.expander("查看错误"):
-                        st.exception(res)
-                    continue
-                res['id'] = str(uuid.uuid4())[:8]
-                res.setdefault('original_text', rec['text'])
-                res.setdefault('attack_strategy', '未知')
-                poisoned_records.append(res)
+            for idx, msg in result['errors']:
+                st.warning(f"第{idx}条投毒失败")
+                with st.expander("查看错误"):
+                    st.text(msg)
 
-            poison_file = 'data/poisoned_corpus.jsonl'
-            with open(poison_file, 'w', encoding='utf-8') as f:
-                for rec in poisoned_records:
-                    out = {
-                        "id": rec['id'],
-                        "text": rec.get('text', ''),
-                        "original_text": rec.get('original_text', ''),
-                        "is_toxic": True,
-                        "toxic_spans": rec.get('toxic_spans', []),
-                        "attack_strategy": rec.get('attack_strategy', '')
-                    }
-                    f.write(json.dumps(out, ensure_ascii=False) + '\n')
-
-            merge_jsonl(clean_path, poison_file, 'data/final_test_mixed.jsonl')
-            st.session_state['final_test'] = 'data/final_test_mixed.jsonl'
+            st.session_state['final_test'] = result['mixed_path']
             st.session_state['_poison_generated'] = True
 
-            # 用 AI 自动生成标题建议
+            # AI 生成标题
             from core.utils import _generate_dataset_title
             ai_title = None
             if api_key and base_url and llm_model:
                 try:
                     ai_title = _generate_dataset_title(
-                        'data/final_test_mixed.jsonl', api_key, base_url, llm_model)
+                        result['mixed_path'], api_key, base_url, llm_model)
                 except Exception:
                     st.warning("AI 标题建议失败，将使用默认名称")
             st.session_state['_ai_suggested_title'] = ai_title or '测试集'
 
             st.success(
-                f"投毒完成！共生成 {len(poisoned_records)} 条有毒文本，最终混合集：data/final_test_mixed.jsonl")
+                f"投毒完成！共生成 {len(result['poisoned_records'])} 条有毒文本，"
+                f"最终混合集：{result['mixed_path']}")
 
-    # 投毒完成后显示 AI 命名 + 保存按钮（独立于按钮点击，持久显示）
+    # ── 投毒后：保存 + 有毒样本对比 ─────────────────────────────
     if st.session_state.get('_poison_generated') and os.path.exists('data/final_test_mixed.jsonl'):
         st.markdown("---")
         st.subheader("💾 保存测试集")
@@ -1813,7 +2349,7 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
                 "数据集标题", value=ai_title,
                 help="可修改 AI 建议的标题", key="dataset_title_input")
         with col_btn:
-            st.write("")  # 对齐
+            st.write("")
             if st.button("💾 确认保存", type="primary", use_container_width=True):
                 saved_path, saved_title = save_dataset(
                     'data/final_test_mixed.jsonl', final_title)
@@ -1822,114 +2358,54 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
                 st.success(f"已保存至：`{saved_path}`")
                 st.rerun()
 
-            final_data = load_jsonl('data/final_test_mixed.jsonl')
-            toxic_samples = [r for r in final_data if r.get('is_toxic')]
-            if toxic_samples:
-                with st.expander(f"🔍 有毒样本对比（共 {len(toxic_samples)} 条）"):
-                    for i, rec in enumerate(toxic_samples[:10]):
-                        original = rec.get('original_text', '（无法获取原文）')
-                        toxic_text = rec.get('text', '')
-                        spans = rec.get('toxic_spans', [])
-                        strategy = rec.get('attack_strategy', '未知')
-                        st.markdown(f"**样本 {i + 1}** | 策略：{strategy}")
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.caption("原文")
-                            st.write(original)
-                        with col2:
-                            st.caption("有毒文本（毒点高亮）")
-                            st.markdown(highlight_toxic(
-                                toxic_text, spans), unsafe_allow_html=True)
-                        st.markdown("---")
+        # 有毒样本对比（上下布局）
+        final_data = load_jsonl('data/final_test_mixed.jsonl')
+        toxic_samples = [r for r in final_data if r.get('is_toxic')]
+        if toxic_samples:
+            with st.expander(f"🔍 有毒样本对比（共 {len(toxic_samples)} 条）"):
+                for i, rec in enumerate(toxic_samples[:10]):
+                    original = rec.get('original_text', '（无法获取原文）')
+                    toxic_text = rec.get('text', '')
+                    spans = rec.get('toxic_spans', [])
+                    strategy = rec.get('attack_strategy', '未知')
+                    st.markdown(f"**样本 {i + 1}** | 策略：{strategy}")
+                    st.caption("原文")
+                    st.write(original)
+                    st.caption("有毒文本（毒点高亮）")
+                    st.markdown(highlight_toxic(toxic_text, spans), unsafe_allow_html=True)
+                    st.markdown("---")
+
+
+def shutil_available():
+    import shutil
+    return shutil.which(st.session_state.bbdown_path) is not None
 
 
 ========================================
  文件: views/tab2_detect.py
  路径: /home/ckc/projects/sentinel-edu/views/tab2_detect.py
- 行数: 517
+ 行数: 422
 ========================================
 
-"""Tab 2: 安全检测 — 文件测试集 或 直接输入文本 → DFA → LLM"""
+"""Tab 2: 安全检测 — 仅负责 Streamlit UI 组件渲染与数据展示。"""
 
 import streamlit as st
 import os
 from pathlib import Path
 
-from core.dfa_scanner import DFAScanner
-from core.llm_scanner import llm_scan
-from core.database import init_db, save_result, get_all_results, update_llm_result
+from core.detect_controller import (
+    init_db_records,
+    dfa_scan_all,
+    llm_scan_candidates,
+    llm_scan_only,
+    inline_detect,
+)
+from core.database import get_all_results
 from core.config import save_session_state
 from core.utils import load_jsonl, list_datasets, delete_dataset
 from views.helpers import (
-    context_snippet, strategy_to_color, safe_json_loads, to_native, run_concurrently
+    context_snippet, strategy_to_color, safe_json_loads, to_native, run_concurrently_ui,
 )
-
-
-def _init_db_records(all_data, dataset_id):
-    """为新样本插入初始记录（避免覆盖已有检测结果）"""
-    init_db()
-    existing_all = get_all_results()
-    already_in_db = set(existing_all['text_id']) if not existing_all.empty else set()
-    for rec in all_data:
-        if rec['id'] in already_in_db:
-            continue
-        true_label = 1 if rec.get('is_toxic') else 0
-        try:
-            save_result(rec['id'], true_label, -1, -1, [], 0, 0, [],
-                        dataset_id=dataset_id, text=rec.get('text', ''))
-        except Exception:
-            st.warning(f"样本 {rec['id']} 初始记录写入失败")
-
-
-def _dfa_scan_all(all_data, dataset_id, progress_placeholder=None):
-    """DFA 全量扫描，返回 {text_id: (dfa_hit, dfa_words)} 并写库"""
-    import time
-    scanner = DFAScanner('sensitive_words.txt')
-    results = {}
-    total = len(all_data)
-    t_start = time.time()
-    for i, rec in enumerate(all_data):
-        text = rec['text']
-        dfa_hit, dfa_words = scanner.scan(text)
-        results[rec['id']] = (dfa_hit, dfa_words)
-        true_label = 1 if rec.get('is_toxic') else 0
-        reason = f'[显性敏感词]：命中关键词 "{", ".join(dfa_words)}"' if dfa_hit else None
-        save_result(rec['id'], true_label, int(dfa_hit), -1, dfa_words, 0, 0,
-                    llm_spans=None, llm_reason=reason,
-                    dataset_id=dataset_id, text=text)
-        if progress_placeholder is not None:
-            elapsed = time.time() - t_start
-            eta = (elapsed / (i + 1)) * (total - i - 1) if i > 0 else 0
-            progress_placeholder.progress(
-                (i + 1) / total,
-                text=f"一防 DFA 扫描中... {i + 1}/{total} | 耗时 {elapsed:.0f}s | 预计剩余 {eta:.0f}s"
-            )
-    return results
-
-
-def _llm_scan_candidates(candidates, api_key, base_url, llm_model, concurrency, dataset_id):
-    """对候选文本并发执行 LLM 扫描并写库"""
-    progress_bar = st.progress(0, text="二防 LLM 扫描中...")
-    tasks = [(llm_scan, (rec['text'], api_key, base_url, llm_model, dfa_words))
-             for rec, dfa_words in candidates]
-    llm_results = run_concurrently(
-        tasks, max_workers=concurrency,
-        progress_placeholder=progress_bar, progress_text="二防 LLM 扫描中"
-    )
-    for (rec, dfa_words), res in zip(candidates, llm_results):
-        true_label = 1 if rec.get('is_toxic') else 0
-        if isinstance(res, Exception):
-            llm_pred, llm_spans, llm_time, llm_reason = -1, [], 0, ''
-        else:
-            llm_pred = int(res.get('is_toxic', False))
-            llm_spans = res.get('toxic_spans', [])
-            llm_time = res.get('time_cost', 0)
-            category = res.get('category', '隐性偏颇')
-            reason_text = res.get('reason', '')
-            llm_reason = f'[{category}]：{reason_text}' if llm_pred == 1 else ''
-        save_result(rec['id'], true_label, -1, llm_pred, None, 0, llm_time, llm_spans,
-                    llm_reason=llm_reason, dataset_id=dataset_id, text=rec.get('text', ''))
-    progress_bar.empty()
 
 
 def _render_status_table(df_all, current_ids):
@@ -1981,7 +2457,7 @@ def _render_batch_highlight(df_all, all_data):
             label_icon = '🦠有毒' if row['true_label'] == 1 else '✅无毒'
             llm_reason_val = row.get('llm_reason', '')
             st.markdown(f'**ID: `{row["text_id"]}`**  |  真实标签: {label_icon}')
-            if llm_reason_val and str(llm_reason_val) != 'nan' and str(llm_reason_val) != 'None':
+            if llm_reason_val and str(llm_reason_val) not in ('nan', 'None'):
                 st.caption(f'📝 {llm_reason_val}')
             col1, col2 = st.columns(2)
             with col1:
@@ -2180,59 +2656,47 @@ def _render_inline_detect(api_ready, api_key, base_url, llm_model):
         return
 
     if st.button("🔍 开始检测", type="primary", disabled=not api_ready):
-        scanner = DFAScanner('sensitive_words.txt')
-
-        # DFA
-        with st.spinner("一防 DFA 扫描中..."):
-            dfa_hit, dfa_words = scanner.scan(inline_text)
-
-        # LLM 全量扫描（DFA 命中≠有毒，由 LLM 结合上下文做最终判定）
-        llm_pred, llm_spans, llm_reason = -1, [], ''
-        if api_ready:
-            with st.spinner("二防 LLM 语义分析中..."):
-                try:
-                    result = llm_scan(inline_text, api_key, base_url, llm_model, dfa_words)
-                    llm_pred = int(result.get('is_toxic', False))
-                    llm_spans = result.get('toxic_spans', [])
-                    if llm_pred == 1:
-                        category = result.get('category', '隐性偏颇')
-                        llm_reason = f"[{category}]：{result.get('reason', '')}"
-                except Exception as e:
-                    st.warning(f"LLM 扫描失败：{e}")
+        with st.spinner("检测中..."):
+            result = inline_detect(inline_text,
+                                   api_key=api_key if api_ready else "",
+                                   base_url=base_url if api_ready else "",
+                                   model=llm_model if api_ready else "")
 
         # 展示结果
         st.markdown("---")
         st.subheader("📊 检测结果")
-        overall_toxic = llm_pred == 1
+        overall_toxic = result['llm_pred'] == 1
         if overall_toxic:
             st.error("⚠️ 该文本被判定为**有毒**")
-            if llm_reason:
-                st.markdown(f"📝 **判定理由**：{llm_reason}")
+            if result['llm_reason']:
+                st.markdown(f"📝 **判定理由**：{result['llm_reason']}")
         else:
             st.success("✅ 该文本判定为**安全**")
 
         col_r1, col_r2 = st.columns(2)
         with col_r1:
             st.markdown("**🔴 一防 DFA（关键词线索）**")
-            if dfa_hit:
-                st.warning(f"发现关键词：{dfa_words}（供 LLM 参考）")
-                dfa_display, _ = context_snippet(inline_text, dfa_words, color='#ff4d4d')
+            if result['dfa_hit']:
+                st.warning(f"发现关键词：{result['dfa_words']}（供 LLM 参考）")
+                dfa_display, _ = context_snippet(inline_text, result['dfa_words'], color='#ff4d4d')
             else:
                 st.success("未发现敏感词")
                 dfa_display = inline_text[:300]
             st.markdown(dfa_display, unsafe_allow_html=True)
+            if result.get('llm_error'):
+                st.warning(f"LLM 扫描失败：{result['llm_error']}")
 
         with col_r2:
             st.markdown("**🟡 二防 LLM**")
-            if llm_pred == 1:
-                st.error(f"检出片段：{llm_spans}")
-                llm_display, _ = context_snippet(inline_text, llm_spans, color='#ffc107')
+            if result['llm_pred'] == 1:
+                st.error(f"检出片段：{result['llm_spans']}")
+                llm_display, _ = context_snippet(inline_text, result['llm_spans'], color='#ffc107')
                 llm_display = llm_display.replace('color:white', 'color:black')
-            elif llm_pred == 0:
+            elif result['llm_pred'] == 0:
                 st.success("安全通过")
                 llm_display = inline_text[:300]
             else:
-                st.info("未检测（DFA 已拦截）")
+                st.info("未检测（API 不可用）")
                 llm_display = '(跳过)'
             st.markdown(llm_display, unsafe_allow_html=True)
 
@@ -2274,7 +2738,6 @@ def render_tab2(api_ready, api_key, base_url, llm_model, concurrency):
         selected_ds = options[selected_label]
         test_file_path = selected_ds['path']
 
-        # 删除按钮
         col_info, col_del = st.columns([3, 1])
         with col_del:
             with st.popover("🗑️ 删除此数据集"):
@@ -2284,12 +2747,13 @@ def render_tab2(api_ready, api_key, base_url, llm_model, concurrency):
                     delete_dataset(selected_ds['path'])
                     st.success("已删除")
                     st.rerun()
+
     all_data = load_jsonl(test_file_path)
     dataset_id = os.path.basename(test_file_path)
     st.session_state['_current_dataset_id'] = dataset_id
     st.success(f"已加载 {len(all_data)} 条样本，其中 {sum(1 for r in all_data if r.get('is_toxic'))} 条有毒")
 
-    _init_db_records(all_data, dataset_id)
+    init_db_records(all_data, dataset_id)
     current_ids = {r['id'] for r in all_data}
     st.session_state['_tab2_current_ids'] = current_ids
     save_session_state()
@@ -2300,17 +2764,17 @@ def render_tab2(api_ready, api_key, base_url, llm_model, concurrency):
 
     with col_main:
         if st.button("🚀 自动检测 (DFA → LLM)", type="primary", disabled=not api_ready, width='stretch'):
-            # — 阶段1：DFA 全量扫描（收集线索）—
             progress = st.progress(0, text="一防 DFA 扫描中...")
-            dfa_results = _dfa_scan_all(all_data, dataset_id, progress_placeholder=progress)
-            progress.empty()
+            dfa_results = dfa_scan_all(all_data, dataset_id, progress_callback=lambda d, t: progress.progress(d / t, text=f"DFA 扫描中 {d}/{t}"))
             dfa_hit_count = sum(1 for hit, _ in dfa_results.values() if hit)
 
-            # — 阶段2：LLM 全量扫描（DFA 命中≠有毒，LLM 结合上下文做最终判决）—
-            # 所有文本都送 LLM，DFA 命中词作为线索（LLM 会甄别否定句/引述等正当语境）
+            progress.progress(0, text="二防 LLM 扫描中...")
             all_candidates = [(rec, dfa_results[rec['id']][1]) for rec in all_data]
-            _llm_scan_candidates(all_candidates, api_key, base_url, llm_model, concurrency, dataset_id)
-
+            llm_scan_candidates(
+                all_candidates, api_key, base_url, llm_model, concurrency, dataset_id,
+                progress_callback=lambda d, t: progress.progress(d / t, text=f"LLM 扫描中 {d}/{t}"),
+            )
+            progress.empty()
             st.success(
                 f"检测完成！DFA 发现 {dfa_hit_count} 个关键词线索，"
                 f"全部 {len(all_data)} 条已由 LLM 结合上下文做最终判定"
@@ -2319,45 +2783,24 @@ def render_tab2(api_ready, api_key, base_url, llm_model, concurrency):
     with col_debug1:
         if st.button("🔰 仅 DFA 扫描", width='stretch'):
             progress = st.progress(0, text="DFA 扫描中...")
-            _dfa_scan_all(all_data, dataset_id, progress_placeholder=progress)
+            dfa_scan_all(all_data, dataset_id, progress_callback=lambda d, t: progress.progress(d / t, text=f"DFA 扫描中 {d}/{t}"))
             progress.empty()
             st.success("DFA 扫描完成")
 
     with col_debug2:
         if st.button("🤖 仅 LLM 扫描", disabled=not api_ready, width='stretch'):
-            df = get_all_results()
-            pre_scan = {row['text_id']: safe_json_loads(row['hit_words'])
-                        for _, row in df[df['text_id'].isin(current_ids)].iterrows()}
             progress_bar = st.progress(0)
-            tasks = [(llm_scan, (rec['text'], api_key, base_url, llm_model, pre_scan.get(rec['id'])))
-                     for rec in all_data]
-            llm_results = run_concurrently(
-                tasks, max_workers=concurrency,
-                progress_placeholder=progress_bar, progress_text="LLM 扫描中"
+            llm_scan_only(
+                all_data, api_key, base_url, llm_model, concurrency, dataset_id,
+                progress_callback=lambda d, t: progress_bar.progress(d / t),
             )
-            for i, (rec, res) in enumerate(zip(all_data, llm_results)):
-                true_label = 1 if rec.get('is_toxic') else 0
-                if isinstance(res, Exception):
-                    update_llm_result(rec['id'], -1, 0, [], '')
-                else:
-                    llm_pred = int(res.get('is_toxic', False))
-                    llm_time = res.get('time_cost', 0)
-                    llm_spans = res.get('toxic_spans', [])
-                    category = res.get('category', '隐性偏颇')
-                    reason_text = res.get('reason', '')
-                    llm_reason = f'[{category}]：{reason_text}' if llm_pred == 1 else ''
-                    existing_row = df[df['text_id'] == rec['id']]
-                    dfa_pred = existing_row['dfa_pred'].values[0] if not existing_row.empty else -1
-                    dfa_hit_words = safe_json_loads(existing_row['hit_words'].values[0]) if not existing_row.empty else []
-                    save_result(rec['id'], true_label, dfa_pred, llm_pred, dfa_hit_words, 0, llm_time, llm_spans,
-                                llm_reason=llm_reason, dataset_id=dataset_id, text=rec.get('text', ''))
             st.success("LLM 扫描完成")
 
     # ----- 结果展示 -----
     df_all = get_all_results()
     df_all = _render_status_table(df_all, current_ids)
 
-    # CSV 导出按钮
+    # CSV 导出
     if not df_all.empty:
         csv = df_all.to_csv(index=False)
         st.download_button("📥 导出 CSV", data=csv,

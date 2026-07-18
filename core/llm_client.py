@@ -94,15 +94,25 @@ class BaseLLMClient:
         return self._extract_content(resp)
 
     def call_and_parse(self, messages, *, temperature=0.0, max_tokens=512, timeout=30) -> dict:
-        """发送 messages，返回 ``json_repair`` 解析后的 ``dict``。"""
+        """发送 messages，返回 ``json_repair`` 解析后的 ``dict``。
+
+        保证返回类型为 ``dict`` —— 当 LLM 返回了 JSON 字符串/数字等非对象
+        类型时，抛出 ``ValueError`` 而非让下游 ``.setdefault()`` 崩溃。
+        """
         content = self.call(
             messages, temperature=temperature, max_tokens=max_tokens, timeout=timeout,
         )
         clean = self._clean_markdown_json_markers(content)
         try:
-            return json_repair.loads(clean)
+            result = json_repair.loads(clean)
         except Exception:
             raise ValueError(
                 f"无法解析 LLM 返回的 JSON:\n"
                 f"原始返回（前500字符）:\n{content[:500]}"
             )
+        if not isinstance(result, dict):
+            raise ValueError(
+                f"LLM 返回了非对象 JSON（类型={type(result).__name__}），"
+                f"期望 dict。原始返回（前500字符）:\n{content[:500]}"
+            )
+        return result
