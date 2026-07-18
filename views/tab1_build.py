@@ -3,6 +3,7 @@
 import streamlit as st
 import os
 import time
+import difflib
 
 from core.asr import is_whisper_model_downloaded
 from core.build_controller import (
@@ -15,6 +16,34 @@ from core.build_controller import (
 )
 from core.utils import texts_to_jsonl, save_dataset, load_jsonl
 from views.helpers import highlight_toxic
+
+
+def _highlight_diff(original: str, corrected: str) -> tuple[str, str]:
+    """用 difflib 逐字符对比原文与纠错后文本，返回 (原文字符串HTML, 纠正字符串HTML)。
+
+    删除内容用红色背景（``#ffcccc``），新增内容用绿色背景（``#ccffcc``），替换内容分
+    别标注。
+    """
+    if original == corrected:
+        return original, corrected
+
+    orig_html, corr_html = [], []
+    matcher = difflib.SequenceMatcher(None, original, corrected)
+    for op, i1, i2, j1, j2 in matcher.get_opcodes():
+        if op == 'equal':
+            seg = original[i1:i2]
+            orig_html.append(seg)
+            corr_html.append(seg)
+        elif op == 'replace':
+            orig_html.append(f'<span style="background:#ffcccc">{original[i1:i2]}</span>')
+            corr_html.append(f'<span style="background:#ccffcc">{corrected[j1:j2]}</span>')
+        elif op == 'delete':
+            orig_html.append(f'<span style="background:#ffcccc;text-decoration:line-through">{original[i1:i2]}</span>')
+            corr_html.append('<span style="background:#eee"> </span>')
+        elif op == 'insert':
+            orig_html.append('<span style="background:#eee"> </span>')
+            corr_html.append(f'<span style="background:#ccffcc">{corrected[j1:j2]}</span>')
+    return ''.join(orig_html), ''.join(corr_html)
 
 
 def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
@@ -71,10 +100,13 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
                         st.error(f"处理文件失败：{e}")
                         st.session_state.pop('_last_file_id', None)
 
-            default_transcript = st.session_state.get('asr_transcript', '')
-            edited = st.text_area(
-                "转写结果（可手动编辑）", default_transcript, height=200, key="transcript_editor")
-            raw_texts = [s for s in edited.split('。') if s.strip()]
+            if 'asr_transcript' in st.session_state:
+                edited = st.text_area(
+                    "转写结果（可手动编辑）", st.session_state['asr_transcript'],
+                    height=200, key="transcript_editor")
+                raw_texts = [s for s in edited.split('。') if s.strip()]
+            else:
+                st.info("切换模型后请重新上传文件进行转写")
 
     # ═══════════════════════════════════════════════════════════════
     #  输入方式 2：B站视频链接
@@ -173,6 +205,23 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
             st.success(f"纠错完成，共 {total} 条，耗时 {time.time() - t_start:.0f}s")
             for idx, msg in errors:
                 st.warning(f"第{idx}条纠错失败，保留原句：{msg}")
+
+    # ── 纠错对比区域 ────────────────────────────────────────────
+    corrected = st.session_state.get('corrected_texts')
+    raw = st.session_state.get('raw_texts')
+    if corrected and raw and len(corrected) == len(raw):
+        with st.expander(f"📊 纠错前后对比（共 {len(corrected)} 条）"):
+            for i, (orig, corr) in enumerate(zip(raw, corrected)):
+                orig_html, corr_html = _highlight_diff(orig, corr)
+                st.markdown(f"**条目 {i + 1}**" + ("（无改动）" if orig == corr else ""))
+                col_l, col_r = st.columns(2)
+                with col_l:
+                    st.caption("原文")
+                    st.markdown(orig_html, unsafe_allow_html=True)
+                with col_r:
+                    st.caption("纠错后")
+                    st.markdown(corr_html, unsafe_allow_html=True)
+                st.markdown("---")
 
     final_texts = st.session_state.get('corrected_texts', st.session_state.get('raw_texts', []))
 

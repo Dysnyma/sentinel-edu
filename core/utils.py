@@ -93,15 +93,14 @@ def save_dataset(jsonl_path, title, api_key=None, base_url=None, model=None):
 
 def _generate_dataset_title(jsonl_path, api_key, base_url, model):
     """调用 LLM 为数据集生成简短标题"""
-    import openai
+    from core.llm_client import BaseLLMClient
     data = load_jsonl(jsonl_path)
     # 采样前几条文本作为提示
     samples = [r.get('text', '')[:100] for r in data[:5] if r.get('text')]
     sample_text = '\n'.join(samples[:3])
 
-    client = openai.OpenAI(api_key=api_key, base_url=base_url)
-    resp = client.chat.completions.create(
-        model=model,
+    client = BaseLLMClient(api_key, base_url, model)
+    title = client.call(
         messages=[{
             "role": "user",
             "content": (
@@ -111,9 +110,8 @@ def _generate_dataset_title(jsonl_path, api_key, base_url, model):
             )
         }],
         max_tokens=20,
-        temperature=0.3
+        temperature=0.3,
     )
-    title = resp.choices[0].message.content
     if title:
         return title.strip().strip('"').strip("'")
     return '测试集'
