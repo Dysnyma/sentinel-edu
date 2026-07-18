@@ -1,19 +1,30 @@
 import time
 
 from core.llm_client import BaseLLMClient
+from core.config import load_prompts
 
-SCAN_PROMPT = """你是一个严格的教学内容安全审核专家。请对以下文本进行安全评估。
 
-{dfa_hint}
+def _get_scan_prompt() -> str:
+    """从配置获取扫描提示词，失败时返回内置兜底。"""
+    try:
+        return load_prompts().get('scan_prompt', _DEFAULT_SCAN_PROMPT)
+    except Exception:
+        return _DEFAULT_SCAN_PROMPT
 
-请重点判断文本是否存在隐性价值观偏颇（历史虚无主义、消极躺平）、不当比喻（低俗网络梗解释严肃概念）等深层次问题。
 
-输出必须为严格的 JSON 字符串，包含以下字段：
-- "is_toxic": 布尔值，是否违规
-- "toxic_spans": 字符串列表，具体有毒片段（无毒则为空数组）
-- "category": 字符串，若违规，三选一："显性敏感词" / "隐性偏颇" / "不当比喻"；若安全则为空字符串
-- "reason": 字符串，若违规则一句话简述问题；若安全则简述为何判定为安全
-文本：{text}"""
+_DEFAULT_SCAN_PROMPT = (
+    '你是一个严格的教学内容安全审核专家。请对以下文本进行安全评估。\n\n'
+    '{dfa_hint}\n\n'
+    '请重点判断文本是否存在隐性价值观偏颇（历史虚无主义、消极躺平）、'
+    '不当比喻（低俗网络梗解释严肃概念）等深层次问题。\n\n'
+    '输出必须为严格的 JSON 字符串，包含以下字段：\n'
+    '- "is_toxic": 布尔值，是否违规\n'
+    '- "toxic_spans": 字符串列表，具体有毒片段（无毒则为空数组）\n'
+    '- "category": 字符串，若违规，三选一：'
+    '"显性敏感词" / "隐性偏颇" / "不当比喻"；若安全则为空字符串\n'
+    '- "reason": 字符串，若违规则一句话简述问题；若安全则简述为何判定为安全\n'
+    '文本：{text}'
+)
 
 
 def llm_scan(text: str, api_key: str, base_url: str, model: str, dfa_words: list = None) -> dict:
@@ -32,7 +43,7 @@ def llm_scan(text: str, api_key: str, base_url: str, model: str, dfa_words: list
 
     messages = [
         {"role": "system", "content": "你是内容安全审核专家，只输出 JSON。"},
-        {"role": "user", "content": SCAN_PROMPT.replace('{dfa_hint}', dfa_hint).replace('{text}', text)},
+        {"role": "user", "content": _get_scan_prompt().replace('{dfa_hint}', dfa_hint).replace('{text}', text)},
     ]
 
     result = client.call_and_parse(messages, temperature=0.0, max_tokens=512, timeout=30)

@@ -3,7 +3,7 @@ import streamlit as st
 import os
 import shutil
 
-from core.config import init_config, save_config_to_file, CONFIG_FILE, load_session_state
+from core.config import init_config, save_config_to_file, CONFIG_FILE, load_session_state, load_prompts, save_prompts
 from core.database import init_db
 from core.asr import is_whisper_model_downloaded
 from views.helpers import check_api_connection
@@ -90,6 +90,39 @@ with st.sidebar.expander("⚙️ 高级工具配置（可选）"):
 
 concurrency = st.sidebar.slider("并发请求数（加速生成/检测）", 1, 6, 3,
                                 help="同时调用大模型的数量，提高速度但可能触发限流。")
+
+# ── 提示词编辑器 ────────────────────────────────────────────
+if 'prompts' not in st.session_state:
+    st.session_state['prompts'] = load_prompts()
+
+with st.sidebar.expander("🤖 提示词编辑（热重载）"):
+    st.caption("编辑后点击保存，下次 LLM 调用即生效")
+    scan = st.text_area("🛡️ 扫描提示词 (SCAN_PROMPT)",
+                        st.session_state['prompts'].get('scan_prompt', ''),
+                        height=200)
+    poison = st.text_area("🦠 投毒提示词 (POISON_PROMPT)",
+                          st.session_state['prompts'].get('poison_prompt', ''),
+                          height=200)
+    correct = st.text_area("✏️ 纠错提示词 (CORRECT_PROMPT)",
+                           st.session_state['prompts'].get('correct_prompt', ''),
+                           height=200)
+    col_reset, col_save = st.columns(2)
+    with col_reset:
+        if st.button("↩️ 恢复默认", use_container_width=True):
+            from core.config import _default_prompts
+            defaults = _default_prompts()
+            st.session_state['prompts'] = defaults
+            save_prompts(**defaults)
+            st.rerun()
+    with col_save:
+        if st.button("💾 保存并应用", type="primary", use_container_width=True):
+            st.session_state['prompts'] = {
+                'scan_prompt': scan,
+                'poison_prompt': poison,
+                'correct_prompt': correct,
+            }
+            save_prompts(scan, poison, correct)
+            st.success("✅ 已保存，将在下次 LLM 调用时生效")
 
 # 规范化 base_url：补全 /v1 后缀
 base_url = base_url.strip().rstrip('/')
