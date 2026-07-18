@@ -114,35 +114,19 @@ def safe_json_loads(value):
         return []
 
 
-def run_concurrently(tasks, max_workers=6, progress_placeholder=None, progress_text=""):
-    """并发执行任务列表，返回结果列表（按输入顺序）。自动显示进度和预计剩余时间。"""
+def run_concurrently_ui(tasks, max_workers=6, progress_placeholder=None, progress_text=""):
+    """UI 版并发执行 — 包装 ``core.utils.run_concurrently`` 并更新 Streamlit 进度条。"""
     import time
-    results = [None] * len(tasks)
+    from core.utils import run_concurrently as _run
     t_start = time.time()
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_idx = {}
-        for idx, task in enumerate(tasks):
-            func, args = task[0], task[1] if len(task) > 1 else ()
-            if isinstance(args, dict):
-                future = executor.submit(func, **args)
-            else:
-                future = executor.submit(func, *args)
-            future_to_idx[future] = idx
 
-        completed = 0
-        total = len(tasks)
-        for future in as_completed(future_to_idx):
-            idx = future_to_idx[future]
-            try:
-                results[idx] = future.result()
-            except Exception as e:
-                results[idx] = e
-            completed += 1
-            if progress_placeholder is not None:
-                elapsed = time.time() - t_start
-                eta = (elapsed / completed) * (total - completed) if completed > 0 else 0
-                progress_placeholder.progress(
-                    completed / total,
-                    text=f"{progress_text} {completed}/{total} | 耗时 {elapsed:.0f}s | 预计剩余 {eta:.0f}s"
-                )
-    return results
+    def _callback(completed, total):
+        if progress_placeholder is not None:
+            elapsed = time.time() - t_start
+            eta = (elapsed / completed) * (total - completed) if completed > 0 else 0
+            progress_placeholder.progress(
+                completed / total,
+                text=f"{progress_text} {completed}/{total} | 耗时 {elapsed:.0f}s | 预计剩余 {eta:.0f}s"
+            )
+
+    return _run(tasks, max_workers=max_workers, progress_callback=_callback)

@@ -26,8 +26,7 @@ from core.asr import (
 )
 from core.text_correction import correct_text
 from core.poison_generator import generate_poison
-from core.utils import texts_to_jsonl, merge_jsonl, load_jsonl, save_dataset, _generate_dataset_title
-from views.helpers import run_concurrently
+from core.utils import load_jsonl, save_dataset, _generate_dataset_title, texts_to_jsonl, merge_jsonl, run_concurrently
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -199,7 +198,7 @@ def run_poison_generation(
     selected = random.sample(clean_data, poison_count)
 
     tasks = [(generate_poison, (rec['text'], api_key, base_url, model)) for rec in selected]
-    raw_results = run_concurrently(tasks, max_workers=concurrency, progress_placeholder=None)
+    raw_results = run_concurrently(tasks, max_workers=concurrency)
 
     poisoned_records = []
     errors = []

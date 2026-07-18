@@ -1,84 +1,22 @@
-"""Tab 2: 安全检测 — 文件测试集 或 直接输入文本 → DFA → LLM"""
+"""Tab 2: 安全检测 — 仅负责 Streamlit UI 组件渲染与数据展示。"""
 
 import streamlit as st
 import os
 from pathlib import Path
 
-from core.dfa_scanner import DFAScanner
-from core.llm_scanner import llm_scan
-from core.database import init_db, save_result, get_all_results, update_llm_result
+from core.detect_controller import (
+    init_db_records,
+    dfa_scan_all,
+    llm_scan_candidates,
+    llm_scan_only,
+    inline_detect,
+)
+from core.database import get_all_results
 from core.config import save_session_state
 from core.utils import load_jsonl, list_datasets, delete_dataset
 from views.helpers import (
-    context_snippet, strategy_to_color, safe_json_loads, to_native, run_concurrently
+    context_snippet, strategy_to_color, safe_json_loads, to_native, run_concurrently_ui,
 )
-
-
-def _init_db_records(all_data, dataset_id):
-    """为新样本插入初始记录（避免覆盖已有检测结果）"""
-    init_db()
-    existing_all = get_all_results()
-    already_in_db = set(existing_all['text_id']) if not existing_all.empty else set()
-    for rec in all_data:
-        if rec['id'] in already_in_db:
-            continue
-        true_label = 1 if rec.get('is_toxic') else 0
-        try:
-            save_result(rec['id'], true_label, -1, -1, [], 0, 0, [],
-                        dataset_id=dataset_id, text=rec.get('text', ''))
-        except Exception:
-            st.warning(f"样本 {rec['id']} 初始记录写入失败")
-
-
-def _dfa_scan_all(all_data, dataset_id, progress_placeholder=None):
-    """DFA 全量扫描，返回 {text_id: (dfa_hit, dfa_words)} 并写库"""
-    import time
-    scanner = DFAScanner('sensitive_words.txt')
-    results = {}
-    total = len(all_data)
-    t_start = time.time()
-    for i, rec in enumerate(all_data):
-        text = rec['text']
-        dfa_hit, dfa_words = scanner.scan(text)
-        results[rec['id']] = (dfa_hit, dfa_words)
-        true_label = 1 if rec.get('is_toxic') else 0
-        reason = f'[显性敏感词]：命中关键词 "{", ".join(dfa_words)}"' if dfa_hit else None
-        save_result(rec['id'], true_label, int(dfa_hit), -1, dfa_words, 0, 0,
-                    llm_spans=None, llm_reason=reason,
-                    dataset_id=dataset_id, text=text)
-        if progress_placeholder is not None:
-            elapsed = time.time() - t_start
-            eta = (elapsed / (i + 1)) * (total - i - 1) if i > 0 else 0
-            progress_placeholder.progress(
-                (i + 1) / total,
-                text=f"一防 DFA 扫描中... {i + 1}/{total} | 耗时 {elapsed:.0f}s | 预计剩余 {eta:.0f}s"
-            )
-    return results
-
-
-def _llm_scan_candidates(candidates, api_key, base_url, llm_model, concurrency, dataset_id):
-    """对候选文本并发执行 LLM 扫描并写库"""
-    progress_bar = st.progress(0, text="二防 LLM 扫描中...")
-    tasks = [(llm_scan, (rec['text'], api_key, base_url, llm_model, dfa_words))
-             for rec, dfa_words in candidates]
-    llm_results = run_concurrently(
-        tasks, max_workers=concurrency,
-        progress_placeholder=progress_bar, progress_text="二防 LLM 扫描中"
-    )
-    for (rec, dfa_words), res in zip(candidates, llm_results):
-        true_label = 1 if rec.get('is_toxic') else 0
-        if isinstance(res, Exception):
-            llm_pred, llm_spans, llm_time, llm_reason = -1, [], 0, ''
-        else:
-            llm_pred = int(res.get('is_toxic', False))
-            llm_spans = res.get('toxic_spans', [])
-            llm_time = res.get('time_cost', 0)
-            category = res.get('category', '隐性偏颇')
-            reason_text = res.get('reason', '')
-            llm_reason = f'[{category}]：{reason_text}' if llm_pred == 1 else ''
-        save_result(rec['id'], true_label, -1, llm_pred, None, 0, llm_time, llm_spans,
-                    llm_reason=llm_reason, dataset_id=dataset_id, text=rec.get('text', ''))
-    progress_bar.empty()
 
 
 def _render_status_table(df_all, current_ids):
@@ -130,7 +68,7 @@ def _render_batch_highlight(df_all, all_data):
             label_icon = '🦠有毒' if row['true_label'] == 1 else '✅无毒'
             llm_reason_val = row.get('llm_reason', '')
             st.markdown(f'**ID: `{row["text_id"]}`**  |  真实标签: {label_icon}')
-            if llm_reason_val and str(llm_reason_val) != 'nan' and str(llm_reason_val) != 'None':
+            if llm_reason_val and str(llm_reason_val) not in ('nan', 'None'):
                 st.caption(f'📝 {llm_reason_val}')
             col1, col2 = st.columns(2)
             with col1:
@@ -329,59 +267,47 @@ def _render_inline_detect(api_ready, api_key, base_url, llm_model):
         return
 
     if st.button("🔍 开始检测", type="primary", disabled=not api_ready):
-        scanner = DFAScanner('sensitive_words.txt')
-
-        # DFA
-        with st.spinner("一防 DFA 扫描中..."):
-            dfa_hit, dfa_words = scanner.scan(inline_text)
-
-        # LLM 全量扫描（DFA 命中≠有毒，由 LLM 结合上下文做最终判定）
-        llm_pred, llm_spans, llm_reason = -1, [], ''
-        if api_ready:
-            with st.spinner("二防 LLM 语义分析中..."):
-                try:
-                    result = llm_scan(inline_text, api_key, base_url, llm_model, dfa_words)
-                    llm_pred = int(result.get('is_toxic', False))
-                    llm_spans = result.get('toxic_spans', [])
-                    if llm_pred == 1:
-                        category = result.get('category', '隐性偏颇')
-                        llm_reason = f"[{category}]：{result.get('reason', '')}"
-                except Exception as e:
-                    st.warning(f"LLM 扫描失败：{e}")
+        with st.spinner("检测中..."):
+            result = inline_detect(inline_text,
+                                   api_key=api_key if api_ready else "",
+                                   base_url=base_url if api_ready else "",
+                                   model=llm_model if api_ready else "")
 
         # 展示结果
         st.markdown("---")
         st.subheader("📊 检测结果")
-        overall_toxic = llm_pred == 1
+        overall_toxic = result['llm_pred'] == 1
         if overall_toxic:
             st.error("⚠️ 该文本被判定为**有毒**")
-            if llm_reason:
-                st.markdown(f"📝 **判定理由**：{llm_reason}")
+            if result['llm_reason']:
+                st.markdown(f"📝 **判定理由**：{result['llm_reason']}")
         else:
             st.success("✅ 该文本判定为**安全**")
 
         col_r1, col_r2 = st.columns(2)
         with col_r1:
             st.markdown("**🔴 一防 DFA（关键词线索）**")
-            if dfa_hit:
-                st.warning(f"发现关键词：{dfa_words}（供 LLM 参考）")
-                dfa_display, _ = context_snippet(inline_text, dfa_words, color='#ff4d4d')
+            if result['dfa_hit']:
+                st.warning(f"发现关键词：{result['dfa_words']}（供 LLM 参考）")
+                dfa_display, _ = context_snippet(inline_text, result['dfa_words'], color='#ff4d4d')
             else:
                 st.success("未发现敏感词")
                 dfa_display = inline_text[:300]
             st.markdown(dfa_display, unsafe_allow_html=True)
+            if result.get('llm_error'):
+                st.warning(f"LLM 扫描失败：{result['llm_error']}")
 
         with col_r2:
             st.markdown("**🟡 二防 LLM**")
-            if llm_pred == 1:
-                st.error(f"检出片段：{llm_spans}")
-                llm_display, _ = context_snippet(inline_text, llm_spans, color='#ffc107')
+            if result['llm_pred'] == 1:
+                st.error(f"检出片段：{result['llm_spans']}")
+                llm_display, _ = context_snippet(inline_text, result['llm_spans'], color='#ffc107')
                 llm_display = llm_display.replace('color:white', 'color:black')
-            elif llm_pred == 0:
+            elif result['llm_pred'] == 0:
                 st.success("安全通过")
                 llm_display = inline_text[:300]
             else:
-                st.info("未检测（DFA 已拦截）")
+                st.info("未检测（API 不可用）")
                 llm_display = '(跳过)'
             st.markdown(llm_display, unsafe_allow_html=True)
 
@@ -423,7 +349,6 @@ def render_tab2(api_ready, api_key, base_url, llm_model, concurrency):
         selected_ds = options[selected_label]
         test_file_path = selected_ds['path']
 
-        # 删除按钮
         col_info, col_del = st.columns([3, 1])
         with col_del:
             with st.popover("🗑️ 删除此数据集"):
@@ -433,12 +358,13 @@ def render_tab2(api_ready, api_key, base_url, llm_model, concurrency):
                     delete_dataset(selected_ds['path'])
                     st.success("已删除")
                     st.rerun()
+
     all_data = load_jsonl(test_file_path)
     dataset_id = os.path.basename(test_file_path)
     st.session_state['_current_dataset_id'] = dataset_id
     st.success(f"已加载 {len(all_data)} 条样本，其中 {sum(1 for r in all_data if r.get('is_toxic'))} 条有毒")
 
-    _init_db_records(all_data, dataset_id)
+    init_db_records(all_data, dataset_id)
     current_ids = {r['id'] for r in all_data}
     st.session_state['_tab2_current_ids'] = current_ids
     save_session_state()
@@ -449,17 +375,17 @@ def render_tab2(api_ready, api_key, base_url, llm_model, concurrency):
 
     with col_main:
         if st.button("🚀 自动检测 (DFA → LLM)", type="primary", disabled=not api_ready, width='stretch'):
-            # — 阶段1：DFA 全量扫描（收集线索）—
             progress = st.progress(0, text="一防 DFA 扫描中...")
-            dfa_results = _dfa_scan_all(all_data, dataset_id, progress_placeholder=progress)
-            progress.empty()
+            dfa_results = dfa_scan_all(all_data, dataset_id, progress_callback=lambda d, t: progress.progress(d / t, text=f"DFA 扫描中 {d}/{t}"))
             dfa_hit_count = sum(1 for hit, _ in dfa_results.values() if hit)
 
-            # — 阶段2：LLM 全量扫描（DFA 命中≠有毒，LLM 结合上下文做最终判决）—
-            # 所有文本都送 LLM，DFA 命中词作为线索（LLM 会甄别否定句/引述等正当语境）
+            progress.progress(0, text="二防 LLM 扫描中...")
             all_candidates = [(rec, dfa_results[rec['id']][1]) for rec in all_data]
-            _llm_scan_candidates(all_candidates, api_key, base_url, llm_model, concurrency, dataset_id)
-
+            llm_scan_candidates(
+                all_candidates, api_key, base_url, llm_model, concurrency, dataset_id,
+                progress_callback=lambda d, t: progress.progress(d / t, text=f"LLM 扫描中 {d}/{t}"),
+            )
+            progress.empty()
             st.success(
                 f"检测完成！DFA 发现 {dfa_hit_count} 个关键词线索，"
                 f"全部 {len(all_data)} 条已由 LLM 结合上下文做最终判定"
@@ -468,45 +394,24 @@ def render_tab2(api_ready, api_key, base_url, llm_model, concurrency):
     with col_debug1:
         if st.button("🔰 仅 DFA 扫描", width='stretch'):
             progress = st.progress(0, text="DFA 扫描中...")
-            _dfa_scan_all(all_data, dataset_id, progress_placeholder=progress)
+            dfa_scan_all(all_data, dataset_id, progress_callback=lambda d, t: progress.progress(d / t, text=f"DFA 扫描中 {d}/{t}"))
             progress.empty()
             st.success("DFA 扫描完成")
 
     with col_debug2:
         if st.button("🤖 仅 LLM 扫描", disabled=not api_ready, width='stretch'):
-            df = get_all_results()
-            pre_scan = {row['text_id']: safe_json_loads(row['hit_words'])
-                        for _, row in df[df['text_id'].isin(current_ids)].iterrows()}
             progress_bar = st.progress(0)
-            tasks = [(llm_scan, (rec['text'], api_key, base_url, llm_model, pre_scan.get(rec['id'])))
-                     for rec in all_data]
-            llm_results = run_concurrently(
-                tasks, max_workers=concurrency,
-                progress_placeholder=progress_bar, progress_text="LLM 扫描中"
+            llm_scan_only(
+                all_data, api_key, base_url, llm_model, concurrency, dataset_id,
+                progress_callback=lambda d, t: progress_bar.progress(d / t),
             )
-            for i, (rec, res) in enumerate(zip(all_data, llm_results)):
-                true_label = 1 if rec.get('is_toxic') else 0
-                if isinstance(res, Exception):
-                    update_llm_result(rec['id'], -1, 0, [], '')
-                else:
-                    llm_pred = int(res.get('is_toxic', False))
-                    llm_time = res.get('time_cost', 0)
-                    llm_spans = res.get('toxic_spans', [])
-                    category = res.get('category', '隐性偏颇')
-                    reason_text = res.get('reason', '')
-                    llm_reason = f'[{category}]：{reason_text}' if llm_pred == 1 else ''
-                    existing_row = df[df['text_id'] == rec['id']]
-                    dfa_pred = existing_row['dfa_pred'].values[0] if not existing_row.empty else -1
-                    dfa_hit_words = safe_json_loads(existing_row['hit_words'].values[0]) if not existing_row.empty else []
-                    save_result(rec['id'], true_label, dfa_pred, llm_pred, dfa_hit_words, 0, llm_time, llm_spans,
-                                llm_reason=llm_reason, dataset_id=dataset_id, text=rec.get('text', ''))
             st.success("LLM 扫描完成")
 
     # ----- 结果展示 -----
     df_all = get_all_results()
     df_all = _render_status_table(df_all, current_ids)
 
-    # CSV 导出按钮
+    # CSV 导出
     if not df_all.empty:
         csv = df_all.to_csv(index=False)
         st.download_button("📥 导出 CSV", data=csv,

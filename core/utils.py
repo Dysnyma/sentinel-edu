@@ -2,7 +2,9 @@ import json
 import os
 import uuid
 import random
+import time
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def texts_to_jsonl(texts: list, output_path: str):
@@ -151,3 +153,49 @@ def list_datasets():
             'clean_count': meta.get('clean_count', '?'),
         })
     return datasets
+
+
+# ---------------------------------------------------------------------------
+#  并发工具（与 UI 无关，仅接受回调）
+# ---------------------------------------------------------------------------
+
+def run_concurrently(tasks, max_workers=6, progress_callback=None):
+    """并发执行任务列表，按输入顺序返回结果。
+
+    Parameters
+    ----------
+    tasks : list[tuple]
+        每个元素为 (func, args)，args 可为 tuple（位置参数）或 dict（关键字参数）。
+    max_workers : int
+        最大并发线程数。
+    progress_callback : callable, optional
+        每完成一个任务时回调 ``progress_callback(completed, total)``。
+
+    Returns
+    -------
+    list
+        与输入等长的结果列表。异常时对应位置为 ``Exception`` 实例。
+    """
+    results = [None] * len(tasks)
+    total = len(tasks)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_idx = {}
+        for idx, task in enumerate(tasks):
+            func, args = task[0], task[1] if len(task) > 1 else ()
+            if isinstance(args, dict):
+                future = executor.submit(func, **args)
+            else:
+                future = executor.submit(func, *args)
+            future_to_idx[future] = idx
+
+        completed = 0
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                results[idx] = future.result()
+            except Exception as e:
+                results[idx] = e
+            completed += 1
+            if progress_callback:
+                progress_callback(completed, total)
+    return results
