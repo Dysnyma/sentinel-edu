@@ -212,3 +212,89 @@ def load_providers() -> list[dict]:
         json.dump(providers, f, ensure_ascii=False, indent=2)
     return providers
 
+
+_SYNC_SOURCES = [
+    "https://raw.githubusercontent.com/Dysnyma/sentinel-edu/main/data/providers.json",
+    "https://xget.xi-xu.me/gh/Dysnyma/sentinel-edu/main/data/providers.json",
+    "https://cdn.jsdelivr.net/gh/Dysnyma/sentinel-edu@main/data/providers.json",
+]
+
+
+def sync_providers() -> tuple[list[dict], bool, str]:
+    """从远程拉取最新服务商配置，合并到本地后保存。
+
+    按 ``_SYNC_SOURCES`` 列表顺序依次尝试，成功一个即返回。
+    可通过环境变量 ``SENTINEL_SYNC_URL`` 覆盖为自定义地址（最高优先级）。
+
+    合并策略：
+    - 按 ``id`` 匹配：直接覆盖 ``models`` 列表（实现远程下架效果）
+    - ``custom`` 始终保留不动
+    - 远程新增的服务商自动追加
+
+    返回 ``(providers, success, message)``。
+    """
+    import urllib.request
+    import os as _os
+
+    # 构建 fallback 链
+    env_url = _os.environ.get('SENTINEL_SYNC_URL', '').strip()
+    sources = ([env_url] if env_url else []) + list(_SYNC_SOURCES)
+
+    remote = None
+    last_error = ""
+    for i, url in enumerate(sources):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "sentinel-edu"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                remote = json.loads(resp.read().decode('utf-8'))
+            last_error = ""
+            break
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    if remote is None:
+        return load_providers(), False, f"同步失败（已尝试 {len(sources)} 个源，最后错误: {last_error}）"
+
+    if not isinstance(remote, list):
+        return load_providers(), False, "远程数据格式错误（期望数组）"
+
+    local = load_providers()
+    local_by_id = {p['id']: p for p in local}
+
+    merged = []
+    seen_ids = set()
+    for rp in remote:
+        pid = rp['id']
+        seen_ids.add(pid)
+        if pid == 'custom':
+            continue
+        if pid in local_by_id:
+            lp = local_by_id[pid]
+            merged.append({
+                "id": pid,
+                "name": lp['name'],
+                "base_url": rp.get('base_url', lp.get('base_url', '')),
+                "models": rp.get('models', []),
+            })
+        else:
+            merged.append(rp)
+
+    # 追加本地有但远程没有的服务商（可能自建的私有提供商）
+    for lid, lp in local_by_id.items():
+        if lid not in seen_ids and lid != 'custom':
+            merged.append(lp)
+
+    # custom 始终在最后
+    if 'custom' in local_by_id:
+        merged.append(local_by_id['custom'])
+    else:
+        merged.append({"id": "custom", "name": "自定义", "base_url": "", "models": []})
+
+    _os.makedirs('data', exist_ok=True)
+    with open(PROVIDERS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(merged, f, ensure_ascii=False, indent=2)
+
+    new_count = len(merged)
+    return merged, True, f"同步成功，共 {new_count} 个服务商"
+

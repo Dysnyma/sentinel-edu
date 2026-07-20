@@ -3,7 +3,7 @@ import streamlit as st
 import os
 import shutil
 
-from core.config import init_config, save_config_to_file, CONFIG_FILE, load_session_state, load_prompts, save_prompts, load_providers
+from core.config import init_config, save_config_to_file, CONFIG_FILE, load_session_state, load_prompts, save_prompts, load_providers, sync_providers
 from core.database import init_db
 from core.asr import is_whisper_model_downloaded
 from views.helpers import check_api_connection
@@ -62,6 +62,16 @@ else:
     model_idx = models.index(st.session_state.llm_model) if st.session_state.llm_model in models else 0
     llm_model = st.sidebar.selectbox(
         "模型", models, index=model_idx, help=f"Base URL: {base_url}")
+
+    st.sidebar.caption("")
+    if st.sidebar.button("🔄 同步最新模型列表", use_container_width=True,
+                         help="从远程拉取最新的服务商和模型配置"):
+        synced, ok, msg = sync_providers()
+        if ok:
+            st.sidebar.success(msg)
+            st.rerun()
+        else:
+            st.sidebar.error(msg)
 
 col_save, col_clear = st.sidebar.columns(2)
 with col_save:
