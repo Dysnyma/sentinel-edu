@@ -214,9 +214,13 @@ def load_providers() -> list[dict]:
 
 
 _SYNC_SOURCES = [
+    # 1-2: 官方直连 + jsDelivr CDN（国外/VPN 环境）
     "https://raw.githubusercontent.com/Dysnyma/sentinel-edu/main/data/providers.json",
-    "https://xget.xi-xu.me/gh/Dysnyma/sentinel-edu/main/data/providers.json",
     "https://cdn.jsdelivr.net/gh/Dysnyma/sentinel-edu@main/data/providers.json",
+    # 3-5: 国内可用镜像源（依次尝试）
+    "https://ghproxy.net/https://raw.githubusercontent.com/Dysnyma/sentinel-edu/main/data/providers.json",
+    "https://gh-proxy.com/https://raw.githubusercontent.com/Dysnyma/sentinel-edu/main/data/providers.json",
+    "https://xget.xi-xu.me/gh/Dysnyma/sentinel-edu/main/data/providers.json",
 ]
 
 
@@ -245,7 +249,7 @@ def sync_providers() -> tuple[list[dict], bool, str]:
     for i, url in enumerate(sources):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "sentinel-edu"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 remote = json.loads(resp.read().decode('utf-8'))
             last_error = ""
             break
@@ -254,7 +258,11 @@ def sync_providers() -> tuple[list[dict], bool, str]:
             continue
 
     if remote is None:
-        return load_providers(), False, f"同步失败（已尝试 {len(sources)} 个源，最后错误: {last_error}）"
+        return load_providers(), False, (
+            f"同步失败（已尝试 {len(sources)} 个源）\n"
+            f"最后错误: {last_error}\n\n"
+            "💡 可尝试：1. 检查网络连接 2. 设置 HTTPS_PROXY 环境变量 "
+            "3. 在「自定义」中手动配置")
 
     if not isinstance(remote, list):
         return load_providers(), False, "远程数据格式错误（期望数组）"
