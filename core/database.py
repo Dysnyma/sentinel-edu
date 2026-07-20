@@ -52,30 +52,35 @@ def init_db():
 
 def save_result(text_id, true_label, dfa_pred, llm_pred, hit_words, dfa_time, llm_time,
                 llm_spans=None, llm_reason=None, dataset_id=None, text=None):
-    """保存检测结果。已有的非默认值（非 -1 / 空字符串）会被保留。"""
+    """原子化 UPSERT：消除 SELECT→INSERT 之间的 TOCTOU 竞态条件。
+
+    已有的非默认值（dfa_pred/llm_pred=-1、hit_words/spans/reason=None）会被保留，
+    不会覆盖数据库中已写入的值。
+    """
     conn = _connect()
     c = conn.cursor()
-    c.execute("SELECT dfa_pred, llm_pred, hit_words, llm_spans, llm_reason FROM results WHERE text_id = ?", (text_id,))
-    row = c.fetchone()
-    if row:
-        ex_dfa, ex_llm, ex_hw, ex_ls, ex_reason = row
-        final_dfa = dfa_pred if dfa_pred != -1 else ex_dfa
-        final_llm = llm_pred if llm_pred != -1 else ex_llm
-        final_hw = json.dumps(hit_words, ensure_ascii=False) if hit_words is not None else ex_hw
-        final_ls = json.dumps(llm_spans or [], ensure_ascii=False) if llm_spans is not None else ex_ls
-        final_reason = llm_reason if llm_reason is not None else ex_reason
-    else:
-        final_dfa = dfa_pred
-        final_llm = llm_pred
-        final_hw = json.dumps(hit_words, ensure_ascii=False)
-        final_ls = json.dumps(llm_spans or [], ensure_ascii=False)
-        final_reason = llm_reason or ''
-    c.execute('''INSERT OR REPLACE INTO results
+    c.execute('''INSERT INTO results
                  (text_id, true_label, dfa_pred, llm_pred, hit_words, dfa_time, llm_time,
                   llm_spans, llm_reason, dataset_id, text)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
-              (text_id, true_label, final_dfa, final_llm, final_hw, dfa_time, llm_time,
-               final_ls, final_reason or '', dataset_id, text))
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                 ON CONFLICT(text_id) DO UPDATE SET
+                     true_label = excluded.true_label,
+                     dfa_pred   = CASE WHEN excluded.dfa_pred != -1  THEN excluded.dfa_pred  ELSE results.dfa_pred END,
+                     llm_pred   = CASE WHEN excluded.llm_pred != -1  THEN excluded.llm_pred  ELSE results.llm_pred END,
+                     hit_words  = COALESCE(excluded.hit_words,  results.hit_words),
+                     llm_spans  = COALESCE(excluded.llm_spans,  results.llm_spans),
+                     llm_reason = COALESCE(excluded.llm_reason, results.llm_reason),
+                     dfa_time   = excluded.dfa_time,
+                     llm_time   = excluded.llm_time,
+                     dataset_id = excluded.dataset_id,
+                     text       = excluded.text''',
+              (text_id, true_label,
+               dfa_pred, llm_pred,
+               json.dumps(hit_words, ensure_ascii=False) if hit_words is not None else None,
+               dfa_time, llm_time,
+               json.dumps(llm_spans or [], ensure_ascii=False) if llm_spans is not None else None,
+               llm_reason,
+               dataset_id, text))
     conn.commit()
     conn.close()
 

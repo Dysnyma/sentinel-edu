@@ -1,19 +1,25 @@
 """共享 UI 辅助函数：高亮、上下文截取、颜色映射、JSON 安全解析等"""
 
+import html
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def highlight_toxic(text, toxic_spans, color='#ff4d4d'):
-    """将 toxic_spans 中的内容以指定颜色高亮，返回 HTML 字符串"""
+    """将 toxic_spans 中的内容以指定颜色高亮，返回 HTML 字符串。
+
+    安全策略：先 ``html.escape`` 转义全文（防止 XSS），
+    再对转义后的 toxic_spans 做正则匹配高亮。
+    """
     if not toxic_spans:
         return text
-    escaped = [re.escape(span) for span in toxic_spans]
-    pattern = re.compile('|'.join(escaped), re.IGNORECASE)
+    escaped_text = html.escape(text)
+    escaped_spans = [html.escape(re.escape(span)) for span in toxic_spans]
+    pattern = re.compile('|'.join(escaped_spans), re.IGNORECASE)
     return pattern.sub(
         lambda m: f'<mark style="background-color:{color}; color:white; padding:0 2px;">{m.group()}</mark>',
-        text
+        escaped_text
     )
 
 

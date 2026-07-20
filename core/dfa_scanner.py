@@ -74,8 +74,9 @@ class DFAScanner:
         # 加载后用于模糊匹配的原词列表
         self._words = []
         self._load(words_file)
-        self.automaton.make_automaton()
-        self.pinyin_automaton.make_automaton()
+        if self._words:
+            self.automaton.make_automaton()
+            self.pinyin_automaton.make_automaton()
 
     def _load(self, file_path):
         self._words = []
@@ -99,8 +100,9 @@ class DFAScanner:
         self.automaton = ahocorasick.Automaton()
         self.pinyin_automaton = ahocorasick.Automaton()
         self._load(self.words_file)
-        self.automaton.make_automaton()
-        self.pinyin_automaton.make_automaton()
+        if self._words:
+            self.automaton.make_automaton()
+            self.pinyin_automaton.make_automaton()
 
     # ---------- 反混淆预处理 ----------
 
@@ -168,6 +170,9 @@ class DFAScanner:
         4. 模糊匹配兜底（rapidfuzz, threshold=90）
         返回 (是否命中, 命中词汇列表)
         """
+        if not self._words:
+            return False, []
+
         normalized = self.normalize(text)
         stripped = self._strip_separators(normalized)
         pinyin_text = self._text_to_pinyin(stripped)
