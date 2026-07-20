@@ -181,17 +181,17 @@ PROVIDERS_FILE = os.path.join('data', 'providers.json')
 
 _DEFAULT_PROVIDERS = [
     {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1",
-     "models": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"]},
+     "models": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o3-mini", "o1"]},
     {"id": "deepseek", "name": "DeepSeek", "base_url": "https://api.deepseek.com",
-     "models": ["deepseek-chat", "deepseek-reasoner"]},
+     "models": ["deepseek-v4-flash", "deepseek-v4-pro"]},
     {"id": "siliconflow", "name": "硅基流动 (SiliconFlow)",
      "base_url": "https://api.siliconflow.cn/v1",
-     "models": ["deepseek-ai/DeepSeek-V2-Chat", "Qwen/Qwen2-72B-Instruct"]},
+     "models": ["deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-R1", "Qwen/Qwen3-235B-A22B"]},
     {"id": "moonshot", "name": "Moonshot (Kimi)",
      "base_url": "https://api.moonshot.cn/v1",
      "models": ["moonshot-v1-8k", "moonshot-v1-32k"]},
     {"id": "groq", "name": "Groq", "base_url": "https://api.groq.com/openai/v1",
-     "models": ["llama3-70b-8192", "llama3-8b-8192"]},
+     "models": ["llama-4.5-scout-17b-16e-instruct", "llama-4.3-scout-8b-8e-instruct"]},
     {"id": "custom", "name": "自定义", "base_url": "", "models": []},
 ]
 
