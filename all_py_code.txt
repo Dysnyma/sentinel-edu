@@ -1,13 +1,13 @@
 ========================================
  Sentinel Edu — 全部 Python 源码合并
- 生成时间: 2026-07-18 22:06:47
- 文件总数: 20
+ 生成时间: 2026-07-18 22:34:09
+ 文件总数: 28
 ========================================
 
 ========================================
  文件: app.py
  路径: /home/ckc/projects/sentinel-edu/app.py
- 行数: 129
+ 行数: 162
 ========================================
 
 """Sentinel-Edu — 课堂思政元素安全性分析原型系统"""
@@ -15,7 +15,7 @@ import streamlit as st
 import os
 import shutil
 
-from core.config import init_config, save_config_to_file, CONFIG_FILE, load_session_state
+from core.config import init_config, save_config_to_file, CONFIG_FILE, load_session_state, load_prompts, save_prompts
 from core.database import init_db
 from core.asr import is_whisper_model_downloaded
 from views.helpers import check_api_connection
@@ -103,6 +103,39 @@ with st.sidebar.expander("⚙️ 高级工具配置（可选）"):
 concurrency = st.sidebar.slider("并发请求数（加速生成/检测）", 1, 6, 3,
                                 help="同时调用大模型的数量，提高速度但可能触发限流。")
 
+# ── 提示词编辑器 ────────────────────────────────────────────
+if 'prompts' not in st.session_state:
+    st.session_state['prompts'] = load_prompts()
+
+with st.sidebar.expander("🤖 提示词编辑（热重载）"):
+    st.caption("编辑后点击保存，下次 LLM 调用即生效")
+    scan = st.text_area("🛡️ 扫描提示词 (SCAN_PROMPT)",
+                        st.session_state['prompts'].get('scan_prompt', ''),
+                        height=200)
+    poison = st.text_area("🦠 投毒提示词 (POISON_PROMPT)",
+                          st.session_state['prompts'].get('poison_prompt', ''),
+                          height=200)
+    correct = st.text_area("✏️ 纠错提示词 (CORRECT_PROMPT)",
+                           st.session_state['prompts'].get('correct_prompt', ''),
+                           height=200)
+    col_reset, col_save = st.columns(2)
+    with col_reset:
+        if st.button("↩️ 恢复默认", use_container_width=True):
+            from core.config import _default_prompts
+            defaults = _default_prompts()
+            st.session_state['prompts'] = defaults
+            save_prompts(**defaults)
+            st.rerun()
+    with col_save:
+        if st.button("💾 保存并应用", type="primary", use_container_width=True):
+            st.session_state['prompts'] = {
+                'scan_prompt': scan,
+                'poison_prompt': poison,
+                'correct_prompt': correct,
+            }
+            save_prompts(scan, poison, correct)
+            st.success("✅ 已保存，将在下次 LLM 调用时生效")
+
 # 规范化 base_url：补全 /v1 后缀
 base_url = base_url.strip().rstrip('/')
 if base_url and not base_url.endswith('/v1'):
@@ -149,6 +182,189 @@ with tab4:
 
 # Sentinel-Edu 核心模块
 # 课堂思政元素安全性分析原型系统
+
+
+========================================
+ 文件: core/analysis_controller.py
+ 路径: /home/ckc/projects/sentinel-edu/core/analysis_controller.py
+ 行数: 175
+========================================
+
+"""可视化分析控制器 — 封装 tab3_analysis.py 中的 Pandas 数据处理与指标计算。"""
+
+import pandas as pd
+
+
+def load_and_prepare_data(
+    df: pd.DataFrame,
+    dataset_id: str | None = None,
+    current_ids: set | None = None,
+    strategy_map: dict | None = None,
+) -> pd.DataFrame:
+    """加载并预处理检测结果 DataFrame。
+
+    步骤：
+    1. 按 current_ids 或 dataset_id 筛选
+    2. 强制数值类型转换
+    3. 计算 ``final_pred`` 列（双防联合判定）
+    4. 加载攻击策略映射
+    """
+    if current_ids is not None:
+        df = df[df['text_id'].isin(current_ids)].copy()
+    elif dataset_id is not None:
+        df = df[df['dataset_id'] == dataset_id].copy()
+
+    if df.empty:
+        return df
+
+    # 强制数值类型
+    df['dfa_pred'] = pd.to_numeric(df['dfa_pred'], errors='coerce').fillna(-1).astype(int)
+    df['llm_pred'] = pd.to_numeric(df['llm_pred'], errors='coerce').fillna(-1).astype(int)
+    df['true_label'] = pd.to_numeric(df['true_label'], errors='coerce').fillna(0).astype(int)
+    df['dfa_time'] = pd.to_numeric(df['dfa_time'], errors='coerce').fillna(0)
+    df['llm_time'] = pd.to_numeric(df['llm_time'], errors='coerce').fillna(0)
+
+    # 联合判定
+    df['final_pred'] = ((df['dfa_pred'] == 1) | (df['llm_pred'] == 1)).astype(int)
+
+    # 策略映射
+    if strategy_map:
+        df['attack_strategy'] = df['text_id'].map(strategy_map).fillna('未知')
+
+    return df
+
+
+def compute_confusion_metrics(scanned: pd.DataFrame) -> dict:
+    """从已扫描样本计算混淆矩阵核心指标。
+
+    返回::
+        {
+            "tp": int, "tn": int, "fp": int, "fn": int,
+            "accuracy": float, "recall": float, "precision": float,
+            "f1": float, "fnr": float, "fpr": float,
+            "scanned_count": int,
+            "avg_dfa_time": float, "avg_llm_time": float, "total_time": float,
+        }
+    """
+    if scanned.empty:
+        return {
+            "tp": 0, "tn": 0, "fp": 0, "fn": 0,
+            "accuracy": 0.0, "recall": 0.0, "precision": 0.0,
+            "f1": 0.0, "fnr": 0.0, "fpr": 0.0,
+            "scanned_count": 0,
+            "avg_dfa_time": 0.0, "avg_llm_time": 0.0, "total_time": 0.0,
+        }
+
+    tp = int(((scanned['true_label'] == 1) & (scanned['final_pred'] == 1)).sum())
+    tn = int(((scanned['true_label'] == 0) & (scanned['final_pred'] == 0)).sum())
+    fp = int(((scanned['true_label'] == 0) & (scanned['final_pred'] == 1)).sum())
+    fn = int(((scanned['true_label'] == 1) & (scanned['final_pred'] == 0)).sum())
+    n = len(scanned)
+
+    accuracy = (tp + tn) / n
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    fnr = fn / (tp + fn) if (tp + fn) > 0 else 0.0
+    fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+
+    dfa_valid = scanned[scanned['dfa_pred'] != -1]
+    llm_valid = scanned[scanned['llm_pred'] != -1]
+    avg_dfa_time = float(dfa_valid['dfa_time'].mean()) if len(dfa_valid) > 0 else 0.0
+    avg_llm_time = float(llm_valid['llm_time'].mean()) if len(llm_valid) > 0 else 0.0
+    total_time = float(scanned['dfa_time'].sum() + scanned['llm_time'].sum())
+
+    return {
+        "tp": tp, "tn": tn, "fp": fp, "fn": fn,
+        "accuracy": accuracy, "recall": recall, "precision": precision,
+        "f1": f1, "fnr": fnr, "fpr": fpr,
+        "scanned_count": n,
+        "avg_dfa_time": avg_dfa_time, "avg_llm_time": avg_llm_time,
+        "total_time": total_time,
+    }
+
+
+def _calc_metrics_pair(true_labels: list, preds: list) -> tuple:
+    """计算单组指标：准确率、召回率、精确率、F1。"""
+    tp = sum(1 for t, p in zip(true_labels, preds) if t == 1 and p == 1)
+    tn = sum(1 for t, p in zip(true_labels, preds) if t == 0 and p == 0)
+    fp = sum(1 for t, p in zip(true_labels, preds) if t == 0 and p == 1)
+    fn = sum(1 for t, p in zip(true_labels, preds) if t == 1 and p == 0)
+    n = len(true_labels)
+    acc = (tp + tn) / n if n > 0 else 0.0
+    rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+    return acc, rec, prec, f1
+
+
+def compute_independent_metrics(scanned: pd.DataFrame) -> dict:
+    """分别计算 DFA 和 LLM 的独立指标。
+
+    返回::
+        {
+            "dfa_acc": float, "dfa_rec": float, "dfa_prec": float, "dfa_f1": float,
+            "llm_acc": float, "llm_rec": float, "llm_prec": float, "llm_f1": float,
+        }
+    """
+    result = {}
+    for prefix, col in [('dfa', 'dfa_pred'), ('llm', 'llm_pred')]:
+        valid = scanned[scanned[col] != -1]
+        if not valid.empty:
+            acc, rec, prec, f1 = _calc_metrics_pair(
+                valid['true_label'].tolist(), valid[col].tolist())
+        else:
+            acc = rec = prec = f1 = 0.0
+        result.update({
+            f'{prefix}_acc': acc,
+            f'{prefix}_rec': rec,
+            f'{prefix}_prec': prec,
+            f'{prefix}_f1': f1,
+        })
+    return result
+
+
+def compute_strategy_analysis(scanned: pd.DataFrame) -> pd.DataFrame:
+    """按攻击策略分组统计拦截效果。"""
+    if 'attack_strategy' not in scanned.columns:
+        return pd.DataFrame()
+
+    toxic_df = scanned[scanned['true_label'] == 1].copy()
+    if toxic_df.empty:
+        return pd.DataFrame()
+
+    strategies = toxic_df['attack_strategy'].unique()
+    records = []
+    for s in strategies:
+        subset = toxic_df[toxic_df['attack_strategy'] == s]
+        s_tp = int((subset['final_pred'] == 1).sum())
+        s_fn = int((subset['final_pred'] == 0).sum())
+        s_total = len(subset)
+        s_recall = s_tp / s_total if s_total > 0 else 0.0
+        s_miss = s_fn / s_total if s_total > 0 else 0.0
+        records.append({
+            '攻击策略': s if s else '无毒',
+            '有毒样本数': s_total,
+            '正确拦截': s_tp,
+            '漏报': s_fn,
+            '召回率': f'{s_recall:.1%}',
+            '漏报率': f'{s_miss:.1%}',
+        })
+    return pd.DataFrame(records)
+
+
+def compute_funnel_data(scanned: pd.DataFrame, total: int) -> dict:
+    """计算双防拦截漏斗数据。
+
+    返回::
+        {"total": int, "dfa_hit": int, "llm_hit": int, "final_hit": int}
+    """
+    return {
+        "total": total,
+        "dfa_hit": int((scanned['dfa_pred'] == 1).sum()),
+        "llm_hit": int((scanned['llm_pred'] == 1).sum()),
+        "final_hit": int((scanned['final_pred'] == 1).sum()),
+    }
 
 
 ========================================
@@ -606,7 +822,7 @@ def save_corrected_dataset(
 ========================================
  文件: core/config.py
  路径: /home/ckc/projects/sentinel-edu/core/config.py
- 行数: 89
+ 行数: 176
 ========================================
 
 import streamlit as st
@@ -698,6 +914,93 @@ def load_session_state():
         pass
     except OSError as e:
         logger.warning("恢复会话状态失败: %s", e)
+
+
+# ---- 提示词管理 ----
+
+PROMPTS_FILE = os.path.join('data', 'prompts.json')
+
+_DEFAULT_SCAN_PROMPT = (
+    '你是一个严格的教学内容安全审核专家。请对以下文本进行安全评估。\n\n'
+    '{dfa_hint}\n\n'
+    '请重点判断文本是否存在隐性价值观偏颇（历史虚无主义、消极躺平）、'
+    '不当比喻（低俗网络梗解释严肃概念）等深层次问题。\n\n'
+    '输出必须为严格的 JSON 字符串，包含以下字段：\n'
+    '- "is_toxic": 布尔值，是否违规\n'
+    '- "toxic_spans": 字符串列表，具体有毒片段（无毒则为空数组）\n'
+    '- "category": 字符串，若违规，三选一：'
+    '"显性敏感词" / "隐性偏颇" / "不当比喻"；若安全则为空字符串\n'
+    '- "reason": 字符串，若违规则一句话简述问题；若安全则简述为何判定为安全\n'
+    '文本：{text}'
+)
+
+_DEFAULT_POISON_PROMPT = (
+    '你现在是一个网络安全红队专家，负责为教学内容安全防火墙生成测试靶场语料。\n'
+    '请接收一段真实的课堂教学文本，并在保持上下文流畅的前提下，'
+    '将其改写为具有安全隐患的文本。\n'
+    '你需要根据以下三种策略随机选择一种进行改写：\n'
+    '1. 显性违规：植入政治/历史的明确违规变体。\n'
+    '2. 隐性偏颇：不包含敏感词，但宣扬历史虚无主义、极端消极、躺平等不良价值观。\n'
+    '3. 不当比喻：用低俗网络梗解释严肃概念。\n\n'
+    '【强制输出格式】\n'
+    '你必须且只能输出严格的 JSON 字符串，不要有任何多余的 Markdown 标记：\n'
+    '{{\n'
+    '"original_text": "原文本",\n'
+    '"attack_strategy": "使用的策略名称",\n'
+    '"text": "改写后的有毒文本",\n'
+    '"toxic_spans": ["具体有毒的词汇或短语1", "具体有毒的词汇或短语2"],\n'
+    '"is_toxic": true\n'
+    '}}\n'
+    '文本内容：{text}'
+)
+
+_DEFAULT_CORRECT_PROMPT = (
+    '你是一个专业的文本校对助手。以下文本是由语音识别（ASR）生成的'
+    '大学思政课教学内容。由于语音识别误差，可能存在同音字、错别字或'
+    '专业术语拼写错误。\n'
+    '请你仅修复其中的错别字和标点符号，**绝对不要**改变原句的口语化表达、'
+    '语气和句子结构。\n'
+    '原始文本：{text}\n'
+    '请直接输出纠错后的文本，无需任何解释。'
+)
+
+
+def _default_prompts() -> dict:
+    return {
+        'scan_prompt': _DEFAULT_SCAN_PROMPT,
+        'poison_prompt': _DEFAULT_POISON_PROMPT,
+        'correct_prompt': _DEFAULT_CORRECT_PROMPT,
+    }
+
+
+def load_prompts() -> dict:
+    """读取 ``data/prompts.json``，不存在时用内置默认值创建并返回。"""
+    if os.path.exists(PROMPTS_FILE):
+        try:
+            with open(PROMPTS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            required = {'scan_prompt', 'poison_prompt', 'correct_prompt'}
+            if required.issubset(data.keys()):
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    # 文件不存在或格式不对 → 写入默认值后返回
+    defaults = _default_prompts()
+    save_prompts(**defaults)
+    return defaults
+
+
+def save_prompts(scan_prompt: str, poison_prompt: str, correct_prompt: str):
+    """将三个提示词持久化到 ``data/prompts.json``。"""
+    os.makedirs('data', exist_ok=True)
+    data = {
+        'scan_prompt': scan_prompt,
+        'poison_prompt': poison_prompt,
+        'correct_prompt': correct_prompt,
+    }
+    with open(PROMPTS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
 
 
 ========================================
@@ -1368,25 +1671,36 @@ class BaseLLMClient:
 ========================================
  文件: core/llm_scanner.py
  路径: /home/ckc/projects/sentinel-edu/core/llm_scanner.py
- 行数: 40
+ 行数: 51
 ========================================
 
 import time
 
 from core.llm_client import BaseLLMClient
+from core.config import load_prompts
 
-SCAN_PROMPT = """你是一个严格的教学内容安全审核专家。请对以下文本进行安全评估。
 
-{dfa_hint}
+def _get_scan_prompt() -> str:
+    """从配置获取扫描提示词，失败时返回内置兜底。"""
+    try:
+        return load_prompts().get('scan_prompt', _DEFAULT_SCAN_PROMPT)
+    except Exception:
+        return _DEFAULT_SCAN_PROMPT
 
-请重点判断文本是否存在隐性价值观偏颇（历史虚无主义、消极躺平）、不当比喻（低俗网络梗解释严肃概念）等深层次问题。
 
-输出必须为严格的 JSON 字符串，包含以下字段：
-- "is_toxic": 布尔值，是否违规
-- "toxic_spans": 字符串列表，具体有毒片段（无毒则为空数组）
-- "category": 字符串，若违规，三选一："显性敏感词" / "隐性偏颇" / "不当比喻"；若安全则为空字符串
-- "reason": 字符串，若违规则一句话简述问题；若安全则简述为何判定为安全
-文本：{text}"""
+_DEFAULT_SCAN_PROMPT = (
+    '你是一个严格的教学内容安全审核专家。请对以下文本进行安全评估。\n\n'
+    '{dfa_hint}\n\n'
+    '请重点判断文本是否存在隐性价值观偏颇（历史虚无主义、消极躺平）、'
+    '不当比喻（低俗网络梗解释严肃概念）等深层次问题。\n\n'
+    '输出必须为严格的 JSON 字符串，包含以下字段：\n'
+    '- "is_toxic": 布尔值，是否违规\n'
+    '- "toxic_spans": 字符串列表，具体有毒片段（无毒则为空数组）\n'
+    '- "category": 字符串，若违规，三选一：'
+    '"显性敏感词" / "隐性偏颇" / "不当比喻"；若安全则为空字符串\n'
+    '- "reason": 字符串，若违规则一句话简述问题；若安全则简述为何判定为安全\n'
+    '文本：{text}'
+)
 
 
 def llm_scan(text: str, api_key: str, base_url: str, model: str, dfa_words: list = None) -> dict:
@@ -1405,7 +1719,7 @@ def llm_scan(text: str, api_key: str, base_url: str, model: str, dfa_words: list
 
     messages = [
         {"role": "system", "content": "你是内容安全审核专家，只输出 JSON。"},
-        {"role": "user", "content": SCAN_PROMPT.replace('{dfa_hint}', dfa_hint).replace('{text}', text)},
+        {"role": "user", "content": _get_scan_prompt().replace('{dfa_hint}', dfa_hint).replace('{text}', text)},
     ]
 
     result = client.call_and_parse(messages, temperature=0.0, max_tokens=512, timeout=30)
@@ -1416,28 +1730,39 @@ def llm_scan(text: str, api_key: str, base_url: str, model: str, dfa_words: list
 ========================================
  文件: core/poison_generator.py
  路径: /home/ckc/projects/sentinel-edu/core/poison_generator.py
- 行数: 39
+ 行数: 50
 ========================================
 
 from core.llm_client import BaseLLMClient
+from core.config import load_prompts
 
-POISON_PROMPT = """你现在是一个网络安全红队专家，负责为教学内容安全防火墙生成测试靶场语料。
-请接收一段真实的课堂教学文本，并在保持上下文流畅的前提下，将其改写为具有安全隐患的文本。
-你需要根据以下三种策略随机选择一种进行改写：
-1. 显性违规：植入政治/历史的明确违规变体。
-2. 隐性偏颇：不包含敏感词，但宣扬历史虚无主义、极端消极、躺平等不良价值观。
-3. 不当比喻：用低俗网络梗解释严肃概念。
 
-【强制输出格式】
-你必须且只能输出严格的 JSON 字符串，不要有任何多余的 Markdown 标记：
-{{
-"original_text": "原文本",
-"attack_strategy": "使用的策略名称",
-"text": "改写后的有毒文本",
-"toxic_spans": ["具体有毒的词汇或短语1", "具体有毒的词汇或短语2"],
-"is_toxic": true
-}}
-文本内容：{text}"""
+def _get_poison_prompt() -> str:
+    try:
+        return load_prompts().get('poison_prompt', _DEFAULT_POISON_PROMPT)
+    except Exception:
+        return _DEFAULT_POISON_PROMPT
+
+
+_DEFAULT_POISON_PROMPT = (
+    '你现在是一个网络安全红队专家，负责为教学内容安全防火墙生成测试靶场语料。\n'
+    '请接收一段真实的课堂教学文本，并在保持上下文流畅的前提下，'
+    '将其改写为具有安全隐患的文本。\n'
+    '你需要根据以下三种策略随机选择一种进行改写：\n'
+    '1. 显性违规：植入政治/历史的明确违规变体。\n'
+    '2. 隐性偏颇：不包含敏感词，但宣扬历史虚无主义、极端消极、躺平等不良价值观。\n'
+    '3. 不当比喻：用低俗网络梗解释严肃概念。\n\n'
+    '【强制输出格式】\n'
+    '你必须且只能输出严格的 JSON 字符串，不要有任何多余的 Markdown 标记：\n'
+    '{{\n'
+    '"original_text": "原文本",\n'
+    '"attack_strategy": "使用的策略名称",\n'
+    '"text": "改写后的有毒文本",\n'
+    '"toxic_spans": ["具体有毒的词汇或短语1", "具体有毒的词汇或短语2"],\n'
+    '"is_toxic": true\n'
+    '}}\n'
+    '文本内容：{text}'
+)
 
 
 def generate_poison(text: str, api_key: str, base_url: str, model: str) -> dict:
@@ -1445,7 +1770,7 @@ def generate_poison(text: str, api_key: str, base_url: str, model: str) -> dict:
 
     messages = [
         {"role": "system", "content": "你是红队专家，只输出 JSON，不要任何解释。"},
-        {"role": "user", "content": POISON_PROMPT.replace('{text}', text)},
+        {"role": "user", "content": _get_poison_prompt().replace('{text}', text)},
     ]
 
     result = client.call_and_parse(messages, temperature=0.8, max_tokens=1024, timeout=60)
@@ -1638,15 +1963,29 @@ def apply_selected(selected_words, wordlist_path='sensitive_words.txt'):
 ========================================
  文件: core/text_correction.py
  路径: /home/ckc/projects/sentinel-edu/core/text_correction.py
- 行数: 17
+ 行数: 31
 ========================================
 
 from core.llm_client import BaseLLMClient
+from core.config import load_prompts
 
-CORRECT_PROMPT = """你是一个专业的文本校对助手。以下文本是由语音识别（ASR）生成的大学思政课教学内容。由于语音识别误差，可能存在同音字、错别字或专业术语拼写错误。
-请你仅修复其中的错别字和标点符号，**绝对不要**改变原句的口语化表达、语气和句子结构。
-原始文本：{text}
-请直接输出纠错后的文本，无需任何解释。"""
+
+def _get_correct_prompt() -> str:
+    try:
+        return load_prompts().get('correct_prompt', _DEFAULT_CORRECT_PROMPT)
+    except Exception:
+        return _DEFAULT_CORRECT_PROMPT
+
+
+_DEFAULT_CORRECT_PROMPT = (
+    '你是一个专业的文本校对助手。以下文本是由语音识别（ASR）生成的'
+    '大学思政课教学内容。由于语音识别误差，可能存在同音字、错别字或'
+    '专业术语拼写错误。\n'
+    '请你仅修复其中的错别字和标点符号，**绝对不要**改变原句的口语化表达、'
+    '语气和句子结构。\n'
+    '原始文本：{text}\n'
+    '请直接输出纠错后的文本，无需任何解释。'
+)
 
 
 def correct_text(text: str, api_key: str, base_url: str, model: str) -> str:
@@ -1654,7 +1993,7 @@ def correct_text(text: str, api_key: str, base_url: str, model: str) -> str:
 
     messages = [
         {"role": "system", "content": "你是一个专业的文本校对助手，仅纠正错别字和标点符号，不得改变原句表达。"},
-        {"role": "user", "content": CORRECT_PROMPT.replace('{text}', text)},
+        {"role": "user", "content": _get_correct_prompt().replace('{text}', text)},
     ]
 
     return client.call(messages, temperature=0.0, max_tokens=1024, timeout=30)
@@ -1870,19 +2209,567 @@ def run_concurrently(tasks, max_workers=6, progress_callback=None):
 
 
 ========================================
+ 文件: tests/__init__.py
+ 路径: /home/ckc/projects/sentinel-edu/tests/__init__.py
+ 行数: 0
+========================================
+
+
+
+========================================
+ 文件: tests/conftest.py
+ 路径: /home/ckc/projects/sentinel-edu/tests/conftest.py
+ 行数: 47
+========================================
+
+"""pytest 共享 fixtures — MockResponse 等。"""
+
+from unittest.mock import Mock
+
+
+class MockMessage:
+    """模拟 ``choices[0].message``。"""
+    def __init__(self, content: str):
+        self.content = content
+
+
+class MockChoice:
+    """模拟 ``choices[0]``。"""
+    def __init__(self, content: str):
+        self.message = MockMessage(content)
+
+
+class MockChatCompletion:
+    """模拟 ``client.chat.completions.create()`` 的返回值。"""
+    def __init__(self, content: str):
+        self.choices = [MockChoice(content)]
+
+
+def make_mock_client(mocker, responses=None, side_effect=None):
+    """辅助函数：快速创建一个 mock 的 OpenAI 客户端。
+
+    Parameters
+    ----------
+    mocker : pytest_mock.MockerFixture
+    responses : list[str], optional
+        每次调用依次返回的响应内容列表。与 side_effect 互斥。
+    side_effect : list, optional
+        每次调用依次触发的返回值或异常列表。与 responses 互斥。
+    """
+    mock_instance = Mock()
+    mock_create = Mock()
+
+    if responses:
+        mock_create.side_effect = [MockChatCompletion(r) for r in responses]
+    elif side_effect:
+        mock_create.side_effect = side_effect
+    else:
+        mock_create.return_value = MockChatCompletion("default")
+
+    mock_instance.chat.completions.create = mock_create
+    mocker.patch('openai.OpenAI', return_value=mock_instance)
+    return mock_create
+
+
+========================================
+ 文件: tests/test_build_controller.py
+ 路径: /home/ckc/projects/sentinel-edu/tests/test_build_controller.py
+ 行数: 50
+========================================
+
+"""build_controller 纯函数测试 — mock LLM 调用。"""
+
+import pytest
+
+pytest.importorskip("streamlit")
+
+from core.build_controller import run_text_correction
+
+
+class TestRunTextCorrection:
+    """文本纠错调度（任务 4.1）。"""
+
+    def test_all_succeed(self, mocker):
+        """全部成功 → 返回全部纠错结果。"""
+        mocker.patch('core.build_controller.correct_text',
+                     side_effect=lambda t, *a, **kw: f"[corrected] {t}")
+
+        texts = ["a", "b", "c"]
+        corrected, errors = run_text_correction(texts, "key", "url", "m")
+        assert corrected == ["[corrected] a", "[corrected] b", "[corrected] c"]
+        assert errors == []
+
+    def test_partial_failures(self, mocker):
+        """部分失败 → 保留原句，记录错误。"""
+        def mock_correct(text, *a, **kw):
+            if text == "bad":
+                raise ValueError("oops")
+            return f"[ok] {text}"
+
+        mocker.patch('core.build_controller.correct_text', mock_correct)
+
+        texts = ["good", "bad", "nice"]
+        corrected, errors = run_text_correction(texts, "key", "url", "m")
+        assert corrected == ["[ok] good", "bad", "[ok] nice"]
+        assert errors == [(1, "oops")]
+
+    def test_progress_callback(self, mocker):
+        """进度回调次数 = 文本条数。"""
+        mocker.patch('core.build_controller.correct_text',
+                     return_value="ok")
+
+        calls = []
+        run_text_correction(
+            ["a", "b", "c", "d"],
+            "key", "url", "m",
+            progress_callback=lambda d, t: calls.append((d, t)),
+        )
+        assert len(calls) == 4
+        assert calls[0] == (1, 4)
+        assert calls[-1] == (4, 4)
+
+
+========================================
+ 文件: tests/test_detect_controller.py
+ 路径: /home/ckc/projects/sentinel-edu/tests/test_detect_controller.py
+ 行数: 69
+========================================
+
+"""detect_controller 纯函数测试 — mock DFAScanner 和 llm_scan。"""
+
+import pytest
+
+pytest.importorskip("streamlit")
+
+from core.detect_controller import inline_detect
+
+
+class TestInlineDetect:
+    """单文本检测（任务 4.2）。"""
+
+    def test_dfa_hit_no_llm(self, mocker):
+        """DFA 命中，LLM 不可用时 llm_pred=-1。"""
+        mocker.patch('core.detect_controller.DFAScanner')
+        scanner_instance = mocker.patch('core.detect_controller.DFAScanner').return_value
+        scanner_instance.scan.return_value = (True, ["badword"])
+
+        result = inline_detect("this contains badword", api_key="")
+        assert result["dfa_hit"] is True
+        assert result["dfa_words"] == ["badword"]
+        assert result["llm_pred"] == -1
+
+    def test_dfa_clean_llm_clean(self, mocker):
+        """DFA 未命中，LLM 判定安全。"""
+        mocker.patch('core.detect_controller.DFAScanner')
+        scanner_instance = mocker.patch('core.detect_controller.DFAScanner').return_value
+        scanner_instance.scan.return_value = (False, [])
+
+        mocker.patch('core.detect_controller.llm_scan',
+                     return_value={"is_toxic": False, "toxic_spans": [], "category": "", "reason": "safe"})
+
+        result = inline_detect("safe text", api_key="key", base_url="url", model="m")
+        assert result["dfa_hit"] is False
+        assert result["llm_pred"] == 0
+
+    def test_dfa_hit_llm_toxic(self, mocker):
+        """DFA 命中，LLM 判定有毒。"""
+        mocker.patch('core.detect_controller.DFAScanner')
+        scanner_instance = mocker.patch('core.detect_controller.DFAScanner').return_value
+        scanner_instance.scan.return_value = (True, ["bad"])
+
+        mocker.patch(
+            'core.detect_controller.llm_scan',
+            return_value={
+                "is_toxic": True,
+                "toxic_spans": ["bad"],
+                "category": "显性敏感词",
+                "reason": "contains bad language",
+            },
+        )
+
+        result = inline_detect("bad text", api_key="key", base_url="url", model="m")
+        assert result["dfa_hit"] is True
+        assert result["llm_pred"] == 1
+        assert "显性敏感词" in result["llm_reason"]
+
+    def test_llm_error(self, mocker):
+        """LLM 调用异常时记录错误。"""
+        mocker.patch('core.detect_controller.DFAScanner')
+        scanner_instance = mocker.patch('core.detect_controller.DFAScanner').return_value
+        scanner_instance.scan.return_value = (False, [])
+
+        mocker.patch('core.detect_controller.llm_scan',
+                     side_effect=ValueError("API error"))
+
+        result = inline_detect("text", api_key="key", base_url="url", model="m")
+        assert result["llm_error"] == "API error"
+        assert result["llm_pred"] == -1
+
+
+========================================
+ 文件: tests/test_llm_client.py
+ 路径: /home/ckc/projects/sentinel-edu/tests/test_llm_client.py
+ 行数: 199
+========================================
+
+"""BaseLLMClient 单元测试 — mock OpenAI API 调用。"""
+
+import re
+import openai
+import pytest
+from core.llm_client import BaseLLMClient
+
+
+class TestURLNormalization:
+    """__init__ 中的 URL 标准化（任务 2.4）。"""
+
+    def test_append_v1(self):
+        client = BaseLLMClient("key", "https://api.example.com", "m")
+        assert client.base_url == "https://api.example.com/v1"
+
+    def test_already_has_v1(self):
+        client = BaseLLMClient("key", "https://api.example.com/v1", "m")
+        assert client.base_url == "https://api.example.com/v1"
+
+    def test_strip_trailing_slash(self):
+        client = BaseLLMClient("key", "https://api.example.com/ ", "m")
+        assert client.base_url == "https://api.example.com/v1"
+
+    def test_strip_api_key(self):
+        client = BaseLLMClient(" skey ", "https://api.example.com/v1", "m")
+        assert client._client
+
+
+class TestRetry:
+    """指数退避重试（任务 2.1）。"""
+
+    def test_second_attempt_succeeds(self, mocker):
+        """第 1 次超时，第 2 次成功。"""
+        mock_create = mocker.patch('openai.OpenAI')
+        instance = mock_create.return_value
+        instance.chat.completions.create.side_effect = [
+            openai.APITimeoutError("timeout"),
+            _mock_response("hello"),
+        ]
+
+        client = BaseLLMClient("key", "https://x.com/v1", "m")
+        result = client.call([{"role": "user", "content": "hi"}])
+
+        assert result == "hello"
+        assert instance.chat.completions.create.call_count == 2
+
+    def test_all_three_fail(self, mocker):
+        """3 次全部失败 → ValueError。"""
+        mock_create = mocker.patch('openai.OpenAI')
+        instance = mock_create.return_value
+        instance.chat.completions.create.side_effect = [
+            _make_api_error(500),
+            _make_api_error(503, "timeout"),
+            _make_api_error(502, "conn"),
+        ]
+
+        client = BaseLLMClient("key", "https://x.com/v1", "m")
+        with pytest.raises(ValueError, match="LLM API 调用失败"):
+            client.call([{"role": "user", "content": "hi"}])
+
+        assert instance.chat.completions.create.call_count == 3
+
+    def test_message_contains_context(self, mocker):
+        """异常消息包含 model 和 base_url。"""
+        mock_create = mocker.patch('openai.OpenAI')
+        instance = mock_create.return_value
+        instance.chat.completions.create.side_effect = \
+            _make_api_error(429, message="bad")
+
+        client = BaseLLMClient("key", "https://x.com/v1", "my-model")
+        with pytest.raises(ValueError) as exc:
+            client.call([{"role": "user", "content": "hi"}])
+        msg = str(exc.value)
+        assert "my-model" in msg
+        assert "https://x.com/v1" in msg
+
+
+class TestExtractContent:
+    """choices[0].message.content 提取（任务 2.2）。"""
+
+    def test_normal_extraction(self, mocker):
+        mocker.patch('openai.OpenAI')
+        client = BaseLLMClient("k", "https://x.com/v1", "m")
+        resp = _mock_response("  hello world  ")
+        result = client._extract_content(resp)
+        assert result == "hello world"
+
+    def test_model_dump_fallback(self, mocker):
+        """属性访问失败时通过 model_dump 降级。"""
+        mocker.patch('openai.OpenAI')
+        client = BaseLLMClient("k", "https://x.com/v1", "m")
+
+        # 模拟一个不支持属性访问的响应对象
+        class WeirdResponse:
+            def model_dump(self):
+                return {"choices": [{"message": {"content": "fallback"}}]}
+
+        result = client._extract_content(WeirdResponse())
+        assert result == "fallback"
+
+    def test_none_content_raises(self, mocker):
+        mocker.patch('openai.OpenAI')
+        client = BaseLLMClient("k", "https://x.com/v1", "m")
+        resp = _mock_response(None)
+        with pytest.raises(ValueError, match="为空"):
+            client._extract_content(resp)
+
+
+class TestJsonMarkers:
+    """Markdown 代码块清理（任务 2.3）。"""
+
+    def test_strip_json_marker(self):
+        client = BaseLLMClient("k", "https://x.com/v1", "m")
+        assert client._clean_markdown_json_markers(
+            '```json\n{"a": 1}\n```') == '{"a": 1}'
+
+    def test_strip_marker_no_lang(self):
+        client = BaseLLMClient("k", "https://x.com/v1", "m")
+        assert client._clean_markdown_json_markers(
+            '```\n{"a": 1}\n```') == '{"a": 1}'
+
+    def test_no_marker(self):
+        client = BaseLLMClient("k", "https://x.com/v1", "m")
+        assert client._clean_markdown_json_markers(
+            '{"a": 1}') == '{"a": 1}'
+
+
+class TestCallAndParse:
+    """call_and_parse JSON 解析与类型检查（任务 2.3）。"""
+
+    def test_parses_valid_json(self, mocker):
+        mock_create = mocker.patch('openai.OpenAI')
+        instance = mock_create.return_value
+        instance.chat.completions.create.return_value = \
+            _mock_response('{"is_toxic": true, "reason": "test"}')
+
+        client = BaseLLMClient("k", "https://x.com/v1", "m")
+        result = client.call_and_parse([{"role": "user", "content": "hi"}])
+        assert result == {"is_toxic": True, "reason": "test"}
+
+    def test_parses_with_markers(self, mocker):
+        """带 ```json 标记也能正确解析。"""
+        mock_create = mocker.patch('openai.OpenAI')
+        instance = mock_create.return_value
+        instance.chat.completions.create.return_value = \
+            _mock_response('```json\n{"key": "val"}\n```')
+
+        client = BaseLLMClient("k", "https://x.com/v1", "m")
+        result = client.call_and_parse([{"role": "user", "content": "hi"}])
+        assert result == {"key": "val"}
+
+    def test_raises_on_non_dict_json(self, mocker):
+        """JSON 字符串类型（非 dict）→ ValueError。"""
+        mock_create = mocker.patch('openai.OpenAI')
+        instance = mock_create.return_value
+        instance.chat.completions.create.return_value = \
+            _mock_response('"just a string"')
+
+        client = BaseLLMClient("k", "https://x.com/v1", "m")
+        with pytest.raises(ValueError, match="非对象 JSON"):
+            client.call_and_parse([{"role": "user", "content": "hi"}])
+
+    def test_raises_on_invalid_json(self, mocker):
+        """json_repair 无法修复的脏 JSON → ValueError。"""
+        mock_create = mocker.patch('openai.OpenAI')
+        instance = mock_create.return_value
+        instance.chat.completions.create.return_value = \
+            _mock_response('{{{{{broken')
+
+        client = BaseLLMClient("k", "https://x.com/v1", "m")
+        with pytest.raises((ValueError, Exception)):
+            client.call_and_parse([{"role": "user", "content": "hi"}])
+
+
+# ---------------------------------------------------------------------------
+#  helpers
+# ---------------------------------------------------------------------------
+
+def _mock_response(content: str | None):
+    """创建一个模拟的 openai 响应对象。"""
+    import types
+    msg = types.SimpleNamespace()
+    msg.content = content
+    choice = types.SimpleNamespace()
+    choice.message = msg
+    resp = types.SimpleNamespace()
+    resp.choices = [choice]
+    return resp
+
+
+def _make_api_error(status_code: int = 500, message: str = "err"):
+    """创建一个模拟的 ``openai.APIError`` 子类实例。"""
+    import httpx
+    req = httpx.Request("POST", "https://x.com/v1/chat/completions")
+    return openai.APIStatusError(
+        message=message,
+        response=httpx.Response(status_code, request=req),
+        body={},
+    )
+
+
+========================================
+ 文件: tests/test_utils.py
+ 路径: /home/ckc/projects/sentinel-edu/tests/test_utils.py
+ 行数: 69
+========================================
+
+"""core.utils 单元测试 — run_concurrently、JSONL 工具。"""
+
+import time
+from core.utils import run_concurrently
+
+
+class TestRunConcurrently:
+    """并发执行工具（任务 3.1）。"""
+
+    def test_normal_execution(self):
+        def double(x):
+            return x * 2
+        tasks = [(double, (1,)), (double, (2,)), (double, (3,))]
+        results = run_concurrently(tasks)
+        assert results == [2, 4, 6]
+
+    def test_preserves_order(self):
+        """结果按输入顺序返回，即使任务完成顺序不同。"""
+        def slow_task(n):
+            time.sleep(0.01 * (3 - n))  # 第3个最快，第1个最慢
+            return n
+
+        tasks = [(slow_task, (1,)), (slow_task, (2,)), (slow_task, (3,))]
+        results = run_concurrently(tasks)
+        assert results == [1, 2, 3]
+
+    def test_exception_collection(self):
+        """异常任务在结果列表中对应位置为 Exception。"""
+        def ok(x):
+            return x
+
+        def broken(x):
+            raise ValueError(f"fail {x}")
+
+        tasks = [(ok, (1,)), (broken, (2,)), (ok, (3,))]
+        results = run_concurrently(tasks)
+        assert results[0] == 1
+        assert isinstance(results[1], ValueError)
+        assert str(results[1]) == "fail 2"
+        assert results[2] == 3
+
+    def test_exception_does_not_block_others(self):
+        """一个任务抛异常不影响其他任务执行。"""
+        def ok(x):
+            return x
+
+        tasks = [(ok, (1,)), (ok, (2,)), (ok, (3,))]
+        results = run_concurrently(tasks, max_workers=6)
+        assert results == [1, 2, 3]
+
+    def test_progress_callback(self):
+        """进度回调次数 = 任务总数。"""
+        def ok(x):
+            return x
+
+        calls = []
+        tasks = [(ok, (1,)), (ok, (2,)), (ok, (3,)), (ok, (4,))]
+        run_concurrently(tasks, progress_callback=lambda d, t: calls.append((d, t)))
+        assert len(calls) == 4
+        assert calls[-1] == (4, 4)  # 最后回调 (completed=4, total=4)
+
+    def test_dict_args(self):
+        """支持关键字参数传参。"""
+        def greet(greeting, name):
+            return f"{greeting}, {name}!"
+
+        tasks = [(greet, {"greeting": "Hello", "name": "Alice"})]
+        results = run_concurrently(tasks)
+        assert results == ["Hello, Alice!"]
+
+
+========================================
+ 文件: tests/test_views.py
+ 路径: /home/ckc/projects/sentinel-edu/tests/test_views.py
+ 行数: 57
+========================================
+
+"""views 层纯函数测试 — _highlight_diff、_split_sentences。"""
+
+import pytest
+
+# 这些函数在 views/tab1_build.py 中，但仅依赖 Python 标准库
+# 导入时需确保 streamlit 可用
+pytest.importorskip("streamlit")
+
+from views.tab1_build import _highlight_diff
+
+
+class TestHighlightDiff:
+    """纠错对比高亮（任务 3.2）。"""
+
+    def test_no_diff(self):
+        orig, corr = _highlight_diff("hello world", "hello world")
+        assert orig == "hello world"
+        assert corr == "hello world"
+
+    def test_equal_strings_return_originals(self):
+        """无差异时返回原始字符串（无 HTML 标记）。"""
+        orig, corr = _highlight_diff("相同文本", "相同文本")
+        assert orig == "相同文本"
+        assert corr == "相同文本"
+        assert "<span" not in orig
+        assert "<span" not in corr
+
+    def test_deletion_highlighted(self):
+        """删除内容带红色背景 + 删除线。"""
+        orig, corr = _highlight_diff("abc def", "abc")
+        assert "background:#ffcccc" in orig
+        assert "text-decoration:line-through" in orig
+        assert " def" in orig
+
+    def test_insertion_highlighted(self):
+        """新增内容带绿色背景。"""
+        orig, corr = _highlight_diff("abc", "abc def")
+        assert "background:#ccffcc" in corr
+        assert " def" in corr
+
+    def test_replacement_highlighted(self):
+        """替换内容分别标注红/绿。"""
+        orig, corr = _highlight_diff("abc", "xyz")
+        assert "background:#ffcccc" in orig
+        assert "background:#ccffcc" in corr
+
+    def test_empty_original(self):
+        """原文为空。"""
+        orig, corr = _highlight_diff("", "new text")
+        assert orig  # 包含占位符
+        assert "background:#ccffcc" in corr
+
+    def test_empty_corrected(self):
+        """纠错后为空。"""
+        orig, corr = _highlight_diff("some text", "")
+        assert "background:#ffcccc" in orig
+        assert corr  # 包含占位符
+
+
+========================================
  文件: views/__init__.py
  路径: /home/ckc/projects/sentinel-edu/views/__init__.py
- 行数: 8
+ 行数: 9
 ========================================
 
 # Sentinel-Edu 视图模块
 from views.helpers import (
     highlight_toxic, context_snippet, strategy_to_color,
-    safe_json_loads, to_native, check_api_connection, run_concurrently
+    safe_json_loads, to_native, check_api_connection, run_concurrently_ui
 )
 from views.tab1_build import render_tab1
 from views.tab2_detect import render_tab2
 from views.tab3_analysis import render_tab3
+from views.tab4_learn import render_tab4
 
 
 ========================================
@@ -2814,10 +3701,10 @@ def render_tab2(api_ready, api_key, base_url, llm_model, concurrency):
 ========================================
  文件: views/tab3_analysis.py
  路径: /home/ckc/projects/sentinel-edu/views/tab3_analysis.py
- 行数: 277
+ 行数: 206
 ========================================
 
-"""Tab 3: 可视化分析 — 混淆矩阵指标 + 详细图表"""
+"""Tab 3: 可视化分析 — 仅负责图表渲染与数据展示。"""
 
 import streamlit as st
 import pandas as pd
@@ -2828,6 +3715,13 @@ import os
 
 from core.database import get_all_results, get_results_by_dataset, get_dataset_ids
 from core.utils import load_jsonl
+from core.analysis_controller import (
+    load_and_prepare_data,
+    compute_confusion_metrics,
+    compute_independent_metrics,
+    compute_strategy_analysis,
+    compute_funnel_data,
+)
 
 
 def _load_strategy_map(dataset_id):
@@ -2845,109 +3739,72 @@ def _load_strategy_map(dataset_id):
 
 def render_tab3():
     st.header("检测结果统计")
-    df = get_all_results()
-    if df.empty:
+    df_raw = get_all_results()
+    if df_raw.empty:
         st.warning("暂无检测数据，请先运行检测")
         return
 
     current_ids = st.session_state.get('_tab2_current_ids', None)
     dataset_id = st.session_state.get('_current_dataset_id', None)
 
-    if current_ids is not None:
-        df = df[df['text_id'].isin(current_ids)].copy()
-    elif dataset_id is not None:
-        df = df[df['dataset_id'] == dataset_id].copy()
-        if df.empty:
-            df_alt = get_results_by_dataset(dataset_id)
-            if not df_alt.empty:
-                df = df_alt
-    else:
+    # 数据集选择（兜底）
+    if current_ids is None and dataset_id is None:
         all_ids = get_dataset_ids()
         if all_ids:
             choice = st.selectbox("选择要分析的数据集", all_ids)
             if choice:
-                df = get_results_by_dataset(choice)
-                if df.empty:
-                    df = get_all_results()
-                    df = df[df['dataset_id'] == choice].copy()
-        else:
-            df = df.copy()
+                df_raw = get_results_by_dataset(choice)
+                dataset_id = choice
 
+    strategy_map = _load_strategy_map(dataset_id) if dataset_id else {}
+
+    df = load_and_prepare_data(df_raw, dataset_id, current_ids, strategy_map)
     if df.empty:
         st.info("暂无当前文件的检测数据，请先运行扫描")
         return
 
-    # 强制转为数值类型
-    df['dfa_pred'] = pd.to_numeric(df['dfa_pred'], errors='coerce').fillna(-1).astype(int)
-    df['llm_pred'] = pd.to_numeric(df['llm_pred'], errors='coerce').fillna(-1).astype(int)
-    df['true_label'] = pd.to_numeric(df['true_label'], errors='coerce').fillna(0).astype(int)
-    df['dfa_time'] = pd.to_numeric(df['dfa_time'], errors='coerce').fillna(0)
-    df['llm_time'] = pd.to_numeric(df['llm_time'], errors='coerce').fillna(0)
-
-    df['final_pred'] = ((df['dfa_pred'] == 1) | (df['llm_pred'] == 1)).astype(int)
-
-    # 加载策略映射
-    strategy_map = _load_strategy_map(dataset_id) if dataset_id else {}
-    if strategy_map:
-        df['attack_strategy'] = df['text_id'].map(strategy_map).fillna('未知')
-
-    # 区分已扫描和未扫描样本
     scanned = df[(df['dfa_pred'] != -1) | (df['llm_pred'] != -1)]
     unscanned = len(df) - len(scanned)
     total = len(df)
 
     # ========== 核心指标 ==========
     if len(scanned) > 0:
-        tp = len(scanned[(scanned['true_label'] == 1) & (scanned['final_pred'] == 1)])
-        tn = len(scanned[(scanned['true_label'] == 0) & (scanned['final_pred'] == 0)])
-        fp = len(scanned[(scanned['true_label'] == 0) & (scanned['final_pred'] == 1)])
-        fn = len(scanned[(scanned['true_label'] == 1) & (scanned['final_pred'] == 0)])
-
-        accuracy = (tp + tn) / len(scanned) if len(scanned) > 0 else 0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-        fnr = fn / (tp + fn) if (tp + fn) > 0 else 0
-        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
-
-        # 时间统计
-        dfa_scanned = scanned[scanned['dfa_pred'] != -1]
-        llm_scanned = scanned[scanned['llm_pred'] != -1]
-        avg_dfa_time = dfa_scanned['dfa_time'].mean() if len(dfa_scanned) > 0 else 0
-        avg_llm_time = llm_scanned['llm_time'].mean() if len(llm_scanned) > 0 else 0
-        total_time = scanned['dfa_time'].sum() + scanned['llm_time'].sum()
+        metrics = compute_confusion_metrics(scanned)
+        indep = compute_independent_metrics(scanned)
+        funnel = compute_funnel_data(scanned, total)
 
         st.subheader("核心指标")
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("总样本", total, delta=f"{unscanned} 未扫描" if unscanned else None)
-        col2.metric("正确拦截 (TP)", tp)
-        col3.metric("漏报 (FN)", fn)
-        col4.metric("误报 (FP)", fp)
+        col2.metric("正确拦截 (TP)", metrics['tp'])
+        col3.metric("漏报 (FN)", metrics['fn'])
+        col4.metric("误报 (FP)", metrics['fp'])
 
         col5, col6, col7, col8 = st.columns(4)
-        col5.metric("准确率 (Accuracy)", f"{accuracy:.1%}")
-        col6.metric("召回率 (Recall)", f"{recall:.1%}")
-        col7.metric("精确率 (Precision)", f"{precision:.1%}")
-        col8.metric("F1 Score", f"{f1:.3f}")
+        col5.metric("准确率 (Accuracy)", f"{metrics['accuracy']:.1%}")
+        col6.metric("召回率 (Recall)", f"{metrics['recall']:.1%}")
+        col7.metric("精确率 (Precision)", f"{metrics['precision']:.1%}")
+        col8.metric("F1 Score", f"{metrics['f1']:.3f}")
 
         col9, col10, col11, col12 = st.columns(4)
-        col9.metric("漏报率 (FNR)", f"{fnr:.1%}")
-        col10.metric("误报率 (FPR)", f"{fpr:.1%}")
-        col11.metric("真阴性 (TN)", tn)
-        col12.metric("已检测样本", len(scanned))
+        col9.metric("漏报率 (FNR)", f"{metrics['fnr']:.1%}")
+        col10.metric("误报率 (FPR)", f"{metrics['fpr']:.1%}")
+        col11.metric("真阴性 (TN)", metrics['tn'])
+        col12.metric("已检测样本", metrics['scanned_count'])
 
         # 耗时指标
         st.subheader("检测耗时")
         tc1, tc2, tc3, tc4 = st.columns(4)
-        tc1.metric("DFA 平均耗时", f"{avg_dfa_time:.3f}s")
-        tc2.metric("LLM 平均耗时", f"{avg_llm_time:.1f}s")
-        tc3.metric("总耗时", f"{total_time:.1f}s")
-        tc4.metric("已检测", f"{len(scanned)} 条")
+        tc1.metric("DFA 平均耗时", f"{metrics['avg_dfa_time']:.3f}s")
+        tc2.metric("LLM 平均耗时", f"{metrics['avg_llm_time']:.1f}s")
+        tc3.metric("总耗时", f"{metrics['total_time']:.1f}s")
+        tc4.metric("已检测", f"{metrics['scanned_count']} 条")
 
         # ========== 混淆矩阵热力图 ==========
         st.markdown("---")
         st.subheader("混淆矩阵")
-        cm = [[tn, fp], [fn, tp]]
+        cm = [[metrics['tn'], metrics['fp']],
+              [metrics['fn'], metrics['tp']]]
         fig_cm = px.imshow(
             cm,
             x=['预测安全', '预测有毒'],
@@ -2963,34 +3820,16 @@ def render_tab3():
         st.markdown("---")
         st.subheader("双防独立指标对比")
 
-        def calc_metrics(true_labels, preds):
-            """计算准确率、召回率、精确率、F1"""
-            _tp = sum(1 for t, p in zip(true_labels, preds) if t == 1 and p == 1)
-            _tn = sum(1 for t, p in zip(true_labels, preds) if t == 0 and p == 0)
-            _fp = sum(1 for t, p in zip(true_labels, preds) if t == 0 and p == 1)
-            _fn = sum(1 for t, p in zip(true_labels, preds) if t == 1 and p == 0)
-            _acc = (_tp + _tn) / len(true_labels) if true_labels else 0
-            _rec = _tp / (_tp + _fn) if (_tp + _fn) > 0 else 0
-            _prec = _tp / (_tp + _fp) if (_tp + _fp) > 0 else 0
-            _f1 = 2 * _prec * _rec / (_prec + _rec) if (_prec + _rec) > 0 else 0
-            return _acc, _rec, _prec, _f1
-
-        dfa_valid = scanned[scanned['dfa_pred'] != -1]
-        llm_valid = scanned[scanned['llm_pred'] != -1]
-
-        dfa_acc, dfa_rec, dfa_prec, dfa_f1 = calc_metrics(
-            dfa_valid['true_label'].tolist(), dfa_valid['dfa_pred'].tolist()) if len(dfa_valid) > 0 else (0, 0, 0, 0)
-        llm_acc, llm_rec, llm_prec, llm_f1 = calc_metrics(
-            llm_valid['true_label'].tolist(), llm_valid['llm_pred'].tolist()) if len(llm_valid) > 0 else (0, 0, 0, 0)
-
         fig_comp = go.Figure(data=[
             go.Bar(name='一防 DFA', x=['准确率', '召回率', '精确率', 'F1'],
-                   y=[dfa_acc, dfa_rec, dfa_prec, dfa_f1],
-                   text=[f'{v:.1%}' for v in [dfa_acc, dfa_rec, dfa_prec, dfa_f1]],
+                   y=[indep['dfa_acc'], indep['dfa_rec'], indep['dfa_prec'], indep['dfa_f1']],
+                   text=[f'{v:.1%}' for v in
+                         [indep['dfa_acc'], indep['dfa_rec'], indep['dfa_prec'], indep['dfa_f1']]],
                    textposition='outside'),
             go.Bar(name='二防 LLM', x=['准确率', '召回率', '精确率', 'F1'],
-                   y=[llm_acc, llm_rec, llm_prec, llm_f1],
-                   text=[f'{v:.1%}' for v in [llm_acc, llm_rec, llm_prec, llm_f1]],
+                   y=[indep['llm_acc'], indep['llm_rec'], indep['llm_prec'], indep['llm_f1']],
+                   text=[f'{v:.1%}' for v in
+                         [indep['llm_acc'], indep['llm_rec'], indep['llm_prec'], indep['llm_f1']]],
                    textposition='outside'),
         ])
         fig_comp.update_layout(
@@ -3002,37 +3841,18 @@ def render_tab3():
 
         # DFA / LLM 单独指标卡片
         cm1, cm2, cm3, cm4 = st.columns(4)
-        cm1.metric("DFA 准确率", f"{dfa_acc:.1%}")
-        cm2.metric("DFA 召回率", f"{dfa_rec:.1%}")
-        cm3.metric("LLM 准确率", f"{llm_acc:.1%}")
-        cm4.metric("LLM 召回率", f"{llm_rec:.1%}")
+        cm1.metric("DFA 准确率", f"{indep['dfa_acc']:.1%}")
+        cm2.metric("DFA 召回率", f"{indep['dfa_rec']:.1%}")
+        cm3.metric("LLM 准确率", f"{indep['llm_acc']:.1%}")
+        cm4.metric("LLM 召回率", f"{indep['llm_rec']:.1%}")
 
         # ========== 攻击策略维度分析 ==========
         if strategy_map:
             st.markdown("---")
             st.subheader("攻击策略维度分析")
-            toxic_df = scanned[scanned['true_label'] == 1].copy()
-            if not toxic_df.empty and 'attack_strategy' in toxic_df.columns:
-                strategies = toxic_df['attack_strategy'].unique()
-                strat_records = []
-                for s in strategies:
-                    subset = toxic_df[toxic_df['attack_strategy'] == s]
-                    s_tp = len(subset[subset['final_pred'] == 1])
-                    s_fn = len(subset[subset['final_pred'] == 0])
-                    s_total = len(subset)
-                    s_recall = s_tp / s_total if s_total > 0 else 0
-                    s_miss = s_fn / s_total if s_total > 0 else 0
-                    strat_records.append({
-                        '攻击策略': s if s else '无毒',
-                        '有毒样本数': s_total,
-                        '正确拦截': s_tp,
-                        '漏报': s_fn,
-                        '召回率': f'{s_recall:.1%}',
-                        '漏报率': f'{s_miss:.1%}',
-                    })
-                strat_df = pd.DataFrame(strat_records)
+            strat_df = compute_strategy_analysis(scanned)
+            if not strat_df.empty:
                 st.dataframe(strat_df, width='stretch', hide_index=True)
-
                 fig_strat = go.Figure(data=[
                     go.Bar(name='正确拦截', x=strat_df['攻击策略'], y=strat_df['正确拦截'],
                            marker_color='#4caf50'),
@@ -3049,13 +3869,9 @@ def render_tab3():
         # ========== 防御管线漏斗图 ==========
         st.markdown("---")
         st.subheader("防御管线流程")
-        dfa_hit = int((scanned['dfa_pred'] == 1).sum())
-        llm_hit = int((scanned['llm_pred'] == 1).sum())
-        final_hit = int((scanned['final_pred'] == 1).sum())
-
         funnel_fig = go.Figure(go.Funnel(
             y=['总样本', 'DFA 命中', 'LLM 命中', '最终拦截'],
-            x=[total, dfa_hit, llm_hit, final_hit],
+            x=[funnel['total'], funnel['dfa_hit'], funnel['llm_hit'], funnel['final_hit']],
             textinfo="value+percent previous",
         ))
         funnel_fig.update_layout(title="双防拦截漏斗")
@@ -3074,7 +3890,7 @@ def render_tab3():
         with col_bar:
             fig2 = px.bar(
                 x=['一防 DFA', '二防 LLM', '联合判定'],
-                y=[dfa_hit, llm_hit, final_hit],
+                y=[funnel['dfa_hit'], funnel['llm_hit'], funnel['final_hit']],
                 labels={'x': '防火墙', 'y': '命中数'},
                 title="防火墙拦截数量对比",
                 text_auto=True,

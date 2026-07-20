@@ -1,6 +1,8 @@
 """增强型 DFA 扫描器：AC 自动机 + 反混淆 + 拼音同音匹配 + 形近字映射 + 模糊兜底"""
 
 import ahocorasick
+import logging
+import os
 import re
 import unicodedata
 
@@ -77,6 +79,11 @@ class DFAScanner:
 
     def _load(self, file_path):
         self._words = []
+        if not os.path.exists(file_path):
+            os.makedirs(os.path.dirname(file_path) or '.', exist_ok=True)
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write("# sensitive words list — template. Add one word per line.\n示例词\n")
+            logging.warning("sensitive words file not found; created template at %s", file_path)
         with open(file_path, 'r', encoding='utf-8') as f:
             for idx, line in enumerate(f):
                 word = line.strip()

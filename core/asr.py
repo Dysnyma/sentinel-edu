@@ -1,5 +1,8 @@
 import openai
-import whisper
+try:
+    import whisper
+except Exception:
+    whisper = None
 import subprocess
 import os
 import warnings
