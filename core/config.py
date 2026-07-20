@@ -174,3 +174,41 @@ def save_prompts(scan_prompt: str, poison_prompt: str, correct_prompt: str):
     with open(PROMPTS_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+
+# ---- 模型服务商配置 ----
+
+PROVIDERS_FILE = os.path.join('data', 'providers.json')
+
+_DEFAULT_PROVIDERS = [
+    {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1",
+     "models": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"]},
+    {"id": "deepseek", "name": "DeepSeek", "base_url": "https://api.deepseek.com",
+     "models": ["deepseek-chat", "deepseek-reasoner"]},
+    {"id": "siliconflow", "name": "硅基流动 (SiliconFlow)",
+     "base_url": "https://api.siliconflow.cn/v1",
+     "models": ["deepseek-ai/DeepSeek-V2-Chat", "Qwen/Qwen2-72B-Instruct"]},
+    {"id": "moonshot", "name": "Moonshot (Kimi)",
+     "base_url": "https://api.moonshot.cn/v1",
+     "models": ["moonshot-v1-8k", "moonshot-v1-32k"]},
+    {"id": "groq", "name": "Groq", "base_url": "https://api.groq.com/openai/v1",
+     "models": ["llama3-70b-8192", "llama3-8b-8192"]},
+    {"id": "custom", "name": "自定义", "base_url": "", "models": []},
+]
+
+
+def load_providers() -> list[dict]:
+    """读取 ``data/providers.json``，不存在时用内置默认值创建并返回。"""
+    if os.path.exists(PROVIDERS_FILE):
+        try:
+            with open(PROVIDERS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, list) and len(data) > 0:
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    providers = _DEFAULT_PROVIDERS
+    os.makedirs('data', exist_ok=True)
+    with open(PROVIDERS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(providers, f, ensure_ascii=False, indent=2)
+    return providers
+

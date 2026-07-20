@@ -96,6 +96,7 @@ bili_sub.*
 # 数据文件（忽略内容，保留目录结构）
 data/*
 !data/.gitkeep
+!data/providers.json
 # 下载的临时视频/音频/字幕
 downloads/*
 !downloads/.gitkeep

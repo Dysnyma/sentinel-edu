@@ -3,7 +3,7 @@ import streamlit as st
 import os
 import shutil
 
-from core.config import init_config, save_config_to_file, CONFIG_FILE, load_session_state, load_prompts, save_prompts
+from core.config import init_config, save_config_to_file, CONFIG_FILE, load_session_state, load_prompts, save_prompts, load_providers
 from core.database import init_db
 from core.asr import is_whisper_model_downloaded
 from views.helpers import check_api_connection
@@ -31,9 +31,38 @@ st.sidebar.header("⚙️ 全局配置")
 st.sidebar.subheader("大模型 API")
 api_key = st.sidebar.text_input(
     "API Key", type="password", value=st.session_state.openai_api_key)
-base_url = st.sidebar.text_input(
-    "API Base URL", value=st.session_state.openai_base_url)
-llm_model = st.sidebar.text_input("LLM 模型", value=st.session_state.llm_model)
+
+providers = load_providers()
+provider_ids = [p['id'] for p in providers]
+provider_names = [p['name'] for p in providers]
+current_provider_id = st.session_state.get('openai_provider_id', 'openai')
+default_idx = provider_ids.index(current_provider_id) if current_provider_id in provider_ids else 0
+
+selected_provider_idx = st.sidebar.selectbox(
+    "服务商", range(len(providers)),
+    format_func=lambda i: provider_names[i], index=default_idx)
+selected_provider = providers[selected_provider_idx]
+
+# 服务商切换时重置模型
+if st.session_state.get('_last_provider_id', None) != selected_provider['id']:
+    st.session_state['_last_provider_id'] = selected_provider['id']
+    st.session_state['openai_provider_id'] = selected_provider['id']
+    if selected_provider['id'] != 'custom':
+        st.session_state.openai_base_url = selected_provider['base_url']
+        st.session_state.llm_model = ''
+
+if selected_provider['id'] == 'custom':
+    base_url = st.sidebar.text_input(
+        "API Base URL", value=st.session_state.openai_base_url)
+    llm_model = st.sidebar.text_input(
+        "LLM 模型", value=st.session_state.llm_model)
+else:
+    base_url = selected_provider['base_url']
+    models = selected_provider.get('models', [])
+    model_idx = models.index(st.session_state.llm_model) if st.session_state.llm_model in models else 0
+    llm_model = st.sidebar.selectbox(
+        "模型", models, index=model_idx, help=f"Base URL: {base_url}")
+
 col_save, col_clear = st.sidebar.columns(2)
 with col_save:
     if st.button("💾 保存配置"):
