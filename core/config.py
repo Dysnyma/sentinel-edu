@@ -30,36 +30,26 @@ def save_config_to_file():
 
 
 def load_config_from_file():
-    """从文件加载配置，文件中有值的字段直接覆盖 session_state（含默认值）"""
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-            for key, value in config.items():
-                if value:  # 文件中非空的值才覆盖
-                    st.session_state[key] = value
-        except json.JSONDecodeError:
-            pass
-        except OSError as e:
-            logger.warning("读取配置文件失败: %s", e)
+    """从文件加载配置，覆盖 session_state 中的对应值。仅首次运行生效。"""
+    if not os.path.exists(CONFIG_FILE):
+        return
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        for key, value in config.items():
+            if value:
+                st.session_state[key] = value
+    except json.JSONDecodeError:
+        pass
+    except OSError as e:
+        logger.warning("读取配置文件失败: %s", e)
 
 
 def init_config():
-    if '_initialized' in st.session_state:
-        return
-    defaults = {
-        'openai_api_key': '',
-        'openai_base_url': 'https://api.openai.com/v1',
-        'llm_model': 'gpt-3.5-turbo',
-        'bbdown_path': './BBDown',
-        'ffmpeg_path': 'ffmpeg',
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-    # 仅在首次初始化时从文件加载已保存的配置
+    """应用启动时初始化配置状态：默认值 → 文件持久值覆盖。"""
+    from core.state import init_state
+    init_state()
     load_config_from_file()
-    st.session_state['_initialized'] = True
 
 
 # ---- 会话状态持久化 ----

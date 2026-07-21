@@ -31,13 +31,6 @@ init_db()
 os.makedirs("data", exist_ok=True)
 os.makedirs("downloads", exist_ok=True)
 
-if 'dialog_concurrency' not in st.session_state:
-    st.session_state.dialog_concurrency = 3
-if 'use_local_whisper' not in st.session_state:
-    st.session_state.use_local_whisper = True
-if 'local_whisper_model' not in st.session_state:
-    st.session_state.local_whisper_model = 'small'
-
 providers = load_providers()
 provider_ids = [p['id'] for p in providers]
 provider_names = [p['name'] for p in providers]
