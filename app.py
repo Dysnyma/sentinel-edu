@@ -30,20 +30,39 @@ init_db()
 os.makedirs("data", exist_ok=True)
 os.makedirs("downloads", exist_ok=True)
 
+def _sync_dlg_api_key():
+    st.session_state.openai_api_key = st.session_state.dlg_api_key
+
+def _sync_dlg_base_url():
+    st.session_state.openai_base_url = st.session_state.dlg_base_url
+
+def _sync_dlg_model():
+    st.session_state.llm_model = st.session_state.dlg_model
+
 # ---------------------------------------------------------------------------
-#  全局设置模态弹窗（简化版 — 直接输入 API Key / Base URL / 模型名）
+#  全局设置模态弹窗 — 用 dlg_* key 避免与侧边栏冲突
 # ---------------------------------------------------------------------------
 @st.dialog("⚙️ 全局系统设置", width="large")
 def global_settings_dialog():
+    # 清除上次 dialog 的 widget 状态，确保从当前 session_state 重新初始化
+    for _k in ['dlg_api_key', 'dlg_base_url', 'dlg_model']:
+        st.session_state.pop(_k, None)
+
     tab1, tab2, tab3 = st.tabs(["🔌 API 与网络", "🛠️ 本地工具", "🧠 提示词工程"])
 
     with tab1:
         st.subheader("大模型 API 配置")
         st.caption("填写 API 地址与模型名，点击「测试连接」验证连通性。")
 
-        st.text_input("API Key（本地模型可留空）", type="password", key="openai_api_key")
-        st.text_input("API Base URL（例如 https://api.openai.com/v1）", key="openai_base_url")
-        st.text_input("LLM 模型（例如 gpt-4o-mini）", key="llm_model")
+        st.text_input("API Key（本地模型可留空）", type="password",
+                       value=st.session_state.get('openai_api_key', ''),
+                       key="dlg_api_key", on_change=_sync_dlg_api_key)
+        st.text_input("API Base URL（例如 https://api.openai.com/v1）",
+                       value=st.session_state.get('openai_base_url', ''),
+                       key="dlg_base_url", on_change=_sync_dlg_base_url)
+        st.text_input("LLM 模型（例如 gpt-4o-mini）",
+                       value=st.session_state.get('llm_model', ''),
+                       key="dlg_model", on_change=_sync_dlg_model)
 
         st.markdown("---")
         col_test, col_save = st.columns([1, 1])
