@@ -151,9 +151,8 @@ st.sidebar.text_input("LLM 模型", key="llm_model",
 st.sidebar.markdown("---")
 st.sidebar.subheader("状态监控")
 
-# 修复：先清洗再判定 —— 避免带空格的假阳性
+# 计算规范化值用于判定与传递，不写回 session_state（widget key 绑定后不可覆写）
 _normalized_base_url = normalize_base_url(st.session_state.get('openai_base_url', ''))
-st.session_state.openai_base_url = _normalized_base_url
 _api_key = st.session_state.get('openai_api_key', '').strip()
 _llm_model = st.session_state.get('llm_model', '').strip()
 
@@ -177,8 +176,9 @@ st.sidebar.markdown("---")
 if st.sidebar.button("⚙️ 全局设置", use_container_width=True, type="primary"):
     global_settings_dialog()
 
-# ---------- 自动持久化配置 ----------
-_current = {'openai_api_key': _api_key, 'openai_base_url': _normalized_base_url, 'llm_model': _llm_model}
+# ---------- 自动持久化配置（用 session_state 原始值比较，避免 normalize 干扰） ----------
+_raw_base = st.session_state.get('openai_base_url', '').strip()
+_current = {'openai_api_key': _api_key, 'openai_base_url': _raw_base, 'llm_model': _llm_model}
 _last_saved = st.session_state.get('_last_saved_config', {})
 if _current != _last_saved:
     save_config_to_file()
