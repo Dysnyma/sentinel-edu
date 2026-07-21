@@ -80,11 +80,8 @@ def global_settings_dialog():
 
     with tab1:
         st.subheader("大模型 API 配置")
-        new_api_key = st.text_input("API Key", type="password",
-                                    value=st.session_state.get('openai_api_key', ''),
-                                    key="dialog_api_key_input")
-        if new_api_key != st.session_state.get('openai_api_key', ''):
-            st.session_state.openai_api_key = new_api_key
+        # 直接绑定 session_state key，避免手动同步在 dialog 作用域下不可靠
+        st.text_input("API Key", type="password", key="openai_api_key")
 
         col_p, col_m = st.columns(2)
         with col_p:
@@ -122,11 +119,7 @@ def global_settings_dialog():
                 )
 
         if selected_provider_d['id'] == 'custom':
-            new_base = st.text_input("API Base URL",
-                                     value=st.session_state.get('openai_base_url', ''),
-                                     key="dialog_base_url_input")
-            if new_base != st.session_state.get('openai_base_url', ''):
-                st.session_state.openai_base_url = new_base
+            st.text_input("API Base URL", key="openai_base_url")
         else:
             st.info(f"📍 默认 Base URL: `{selected_provider_d.get('base_url', '')}`")
 
@@ -274,10 +267,8 @@ st.session_state.openai_base_url = _normalized_base_url
 _api_key = st.session_state.get('openai_api_key', '').strip()
 _llm_model = st.session_state.get('llm_model', '').strip()
 
-# 修复：custom 服务商允许 API Key 为空（本地模型场景）
-_is_custom = providers[st.session_state.sidebar_provider_idx]['id'] == 'custom'
-api_ready = bool(_normalized_base_url) and bool(_llm_model) and \
-    (bool(_api_key) or _is_custom)
+# API 就绪只需 Base URL 和模型名，API Key 在测试连接时验证
+api_ready = bool(_normalized_base_url) and bool(_llm_model)
 st.sidebar.markdown(f"{'🟢' if api_ready else '🔴'} **API**: {'已就绪' if api_ready else '未配置'}")
 
 ffmpeg_ready = shutil.which(st.session_state.get('ffmpeg_path', 'ffmpeg')) is not None

@@ -196,7 +196,7 @@ _DEFAULT_PROVIDERS = [
     {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1",
      "models": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o3-mini", "o1"]},
     {"id": "deepseek", "name": "DeepSeek", "base_url": "https://api.deepseek.com",
-     "models": ["deepseek-v4-flash", "deepseek-v4-pro"]},
+     "models": ["deepseek-chat", "deepseek-reasoner"]},
     {"id": "siliconflow", "name": "硅基流动 (SiliconFlow)",
      "base_url": "https://api.siliconflow.cn/v1",
      "models": ["deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-R1", "Qwen/Qwen3-235B-A22B"]},
