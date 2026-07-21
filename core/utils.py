@@ -101,7 +101,7 @@ def _generate_dataset_title(jsonl_path, api_key, base_url, model):
     samples = [r.get('text', '')[:100] for r in data[:5] if r.get('text')]
     sample_text = '\n'.join(samples[:3])
 
-    client = BaseLLMClient(api_key, base_url, model)
+    client = BaseLLMClient.get_instance(api_key, base_url, model)
     title = client.call(
         messages=[{
             "role": "user",

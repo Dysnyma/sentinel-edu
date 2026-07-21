@@ -21,7 +21,7 @@ CONFIG_FILE = os.path.join('data', 'apiconfig.json')
 def save_config_to_file():
     config = {
         'openai_api_key': st.session_state.get('openai_api_key', ''),
-        'openai_base_url': st.session_state.get('openai_base_url', ''),
+        'openai_base_url': normalize_base_url(st.session_state.get('openai_base_url', '')),
         'llm_model': st.session_state.get('llm_model', ''),
     }
     os.makedirs('data', exist_ok=True)
@@ -38,7 +38,10 @@ def load_config_from_file():
             config = json.load(f)
         for key, value in config.items():
             if value:
-                st.session_state[key] = value
+                if key == 'openai_base_url':
+                    st.session_state[key] = normalize_base_url(value)
+                else:
+                    st.session_state[key] = value
     except json.JSONDecodeError:
         pass
     except OSError as e:
