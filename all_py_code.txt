@@ -1,13 +1,13 @@
 ========================================
  Sentinel Edu — 全部 Python 源码合并
- 生成时间: 2026-07-21 20:02:40
- 文件总数: 30
+ 生成时间: 2026-07-21 20:16:22
+ 文件总数: 31
 ========================================
 
 ========================================
  文件: app.py
  路径: /home/ckc/projects/sentinel-edu/app.py
- 行数: 327
+ 行数: 311
 ========================================
 
 """Sentinel-Edu — 课堂思政元素安全性分析原型系统"""
@@ -42,13 +42,6 @@ load_session_state()
 init_db()
 os.makedirs("data", exist_ok=True)
 os.makedirs("downloads", exist_ok=True)
-
-if 'dialog_concurrency' not in st.session_state:
-    st.session_state.dialog_concurrency = 3
-if 'use_local_whisper' not in st.session_state:
-    st.session_state.use_local_whisper = True
-if 'local_whisper_model' not in st.session_state:
-    st.session_state.local_whisper_model = 'small'
 
 providers = load_providers()
 provider_ids = [p['id'] for p in providers]
@@ -92,11 +85,8 @@ def global_settings_dialog():
 
     with tab1:
         st.subheader("大模型 API 配置")
-        new_api_key = st.text_input("API Key", type="password",
-                                    value=st.session_state.get('openai_api_key', ''),
-                                    key="dialog_api_key_input")
-        if new_api_key != st.session_state.get('openai_api_key', ''):
-            st.session_state.openai_api_key = new_api_key
+        # 直接绑定 session_state key，避免手动同步在 dialog 作用域下不可靠
+        st.text_input("API Key", type="password", key="openai_api_key")
 
         col_p, col_m = st.columns(2)
         with col_p:
@@ -134,11 +124,7 @@ def global_settings_dialog():
                 )
 
         if selected_provider_d['id'] == 'custom':
-            new_base = st.text_input("API Base URL",
-                                     value=st.session_state.get('openai_base_url', ''),
-                                     key="dialog_base_url_input")
-            if new_base != st.session_state.get('openai_base_url', ''):
-                st.session_state.openai_base_url = new_base
+            st.text_input("API Base URL", key="openai_base_url")
         else:
             st.info(f"📍 默认 Base URL: `{selected_provider_d.get('base_url', '')}`")
 
@@ -286,10 +272,8 @@ st.session_state.openai_base_url = _normalized_base_url
 _api_key = st.session_state.get('openai_api_key', '').strip()
 _llm_model = st.session_state.get('llm_model', '').strip()
 
-# 修复：custom 服务商允许 API Key 为空（本地模型场景）
-_is_custom = providers[st.session_state.sidebar_provider_idx]['id'] == 'custom'
-api_ready = bool(_normalized_base_url) and bool(_llm_model) and \
-    (bool(_api_key) or _is_custom)
+# API 就绪只需 Base URL 和模型名，API Key 在测试连接时验证
+api_ready = bool(_normalized_base_url) and bool(_llm_model)
 st.sidebar.markdown(f"{'🟢' if api_ready else '🔴'} **API**: {'已就绪' if api_ready else '未配置'}")
 
 ffmpeg_ready = shutil.which(st.session_state.get('ffmpeg_path', 'ffmpeg')) is not None
@@ -990,7 +974,7 @@ def save_corrected_dataset(
 ========================================
  文件: core/config.py
  路径: /home/ckc/projects/sentinel-edu/core/config.py
- 行数: 321
+ 行数: 311
 ========================================
 
 import streamlit as st
@@ -1025,36 +1009,26 @@ def save_config_to_file():
 
 
 def load_config_from_file():
-    """从文件加载配置，文件中有值的字段直接覆盖 session_state（含默认值）"""
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-            for key, value in config.items():
-                if value:  # 文件中非空的值才覆盖
-                    st.session_state[key] = value
-        except json.JSONDecodeError:
-            pass
-        except OSError as e:
-            logger.warning("读取配置文件失败: %s", e)
+    """从文件加载配置，覆盖 session_state 中的对应值。仅首次运行生效。"""
+    if not os.path.exists(CONFIG_FILE):
+        return
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        for key, value in config.items():
+            if value:
+                st.session_state[key] = value
+    except json.JSONDecodeError:
+        pass
+    except OSError as e:
+        logger.warning("读取配置文件失败: %s", e)
 
 
 def init_config():
-    if '_initialized' in st.session_state:
-        return
-    defaults = {
-        'openai_api_key': '',
-        'openai_base_url': 'https://api.openai.com/v1',
-        'llm_model': 'gpt-3.5-turbo',
-        'bbdown_path': './BBDown',
-        'ffmpeg_path': 'ffmpeg',
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-    # 仅在首次初始化时从文件加载已保存的配置
+    """应用启动时初始化配置状态：默认值 → 文件持久值覆盖。"""
+    from core.state import init_state
+    init_state()
     load_config_from_file()
-    st.session_state['_initialized'] = True
 
 
 # ---- 会话状态持久化 ----
@@ -1191,7 +1165,7 @@ _DEFAULT_PROVIDERS = [
     {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1",
      "models": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o3-mini", "o1"]},
     {"id": "deepseek", "name": "DeepSeek", "base_url": "https://api.deepseek.com",
-     "models": ["deepseek-v4-flash", "deepseek-v4-pro"]},
+     "models": ["deepseek-chat", "deepseek-reasoner"]},
     {"id": "siliconflow", "name": "硅基流动 (SiliconFlow)",
      "base_url": "https://api.siliconflow.cn/v1",
      "models": ["deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-R1", "Qwen/Qwen3-235B-A22B"]},
@@ -2430,6 +2404,55 @@ def apply_selected(selected_words, wordlist_path='sensitive_words.txt'):
             f.write(f'\n{w}')
 
     return len(new_words), new_words
+
+
+========================================
+ 文件: core/state.py
+ 路径: /home/ckc/projects/sentinel-edu/core/state.py
+ 行数: 41
+========================================
+
+"""Streamlit 运行状态管理 — 单入口初始化，全局唯一真源。"""
+
+import streamlit as st
+
+
+# 配置类状态（可持久化到 config.json）
+DEFAULT_CONFIG_STATE = {
+    'openai_api_key': '',
+    'openai_base_url': 'https://api.openai.com/v1',
+    'llm_model': 'gpt-3.5-turbo',
+    'bbdown_path': './BBDown',
+    'ffmpeg_path': 'ffmpeg',
+}
+
+# UI 类状态（不持久化到 config.json）
+DEFAULT_UI_STATE = {
+    'dialog_concurrency': 3,
+    'use_local_whisper': True,
+    'local_whisper_model': 'small',
+}
+
+
+def init_state():
+    """应用启动时统一初始化 session_state，仅首次运行有效。
+
+    数据流: config.json → init_state() → session_state → UI
+    """
+    if '_initialized' in st.session_state:
+        return
+
+    # 1. 配置状态
+    for k, v in DEFAULT_CONFIG_STATE.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+    # 2. UI 状态
+    for k, v in DEFAULT_UI_STATE.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+    st.session_state['_initialized'] = True
 
 
 ========================================

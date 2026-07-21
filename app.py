@@ -6,8 +6,7 @@ import time
 
 from core.config import (
     init_config, save_config_to_file, CONFIG_FILE, load_session_state,
-    load_prompts, save_prompts, load_providers, sync_providers,
-    normalize_base_url,
+    load_prompts, save_prompts, normalize_base_url,
 )
 from core.database import init_db
 from core.asr import is_whisper_model_downloaded
@@ -31,128 +30,50 @@ init_db()
 os.makedirs("data", exist_ok=True)
 os.makedirs("downloads", exist_ok=True)
 
-providers = load_providers()
-provider_ids = [p['id'] for p in providers]
-provider_names = [p['name'] for p in providers]
-current_provider_id = st.session_state.get('openai_provider_id', 'openai')
-default_idx = provider_ids.index(current_provider_id) if current_provider_id in provider_ids else 0
-
-if 'sidebar_provider_idx' not in st.session_state:
-    st.session_state.sidebar_provider_idx = default_idx
-if 'dialog_provider_idx' not in st.session_state:
-    st.session_state.dialog_provider_idx = default_idx
-
-# ---------- 状态双向同步回调 ----------
-def sync_provider_callback(source):
-    target = 'dialog_provider_idx' if source == 'sidebar_provider_idx' else 'sidebar_provider_idx'
-    idx = st.session_state[source]
-    st.session_state[target] = idx
-    st.session_state.openai_provider_id = providers[idx]['id']
-
-    if providers[idx]['id'] != 'custom':
-        st.session_state.openai_base_url = providers[idx]['base_url']
-        models = providers[idx].get('models', [])
-        # 仅当当前模型不在新服务商列表中时回退到首个模型
-        if models and st.session_state.get('llm_model') not in models:
-            st.session_state.llm_model = models[0]
-
-def sync_model_callback(source):
-    target = 'dialog_model' if source == 'sidebar_model' else 'sidebar_model'
-    st.session_state[target] = st.session_state[source]
-    st.session_state.llm_model = st.session_state[source]
-
-def sync_custom_model_callback(source):
-    target = 'dialog_model_custom' if source == 'sidebar_model_custom' else 'sidebar_model_custom'
-    st.session_state[target] = st.session_state[source]
-    st.session_state.llm_model = st.session_state[source]
-
-# ---------- 全局设置模态弹窗 ----------
+# ---------------------------------------------------------------------------
+#  全局设置模态弹窗（简化版 — 直接输入 API Key / Base URL / 模型名）
+# ---------------------------------------------------------------------------
 @st.dialog("⚙️ 全局系统设置", width="large")
 def global_settings_dialog():
     tab1, tab2, tab3 = st.tabs(["🔌 API 与网络", "🛠️ 本地工具", "🧠 提示词工程"])
 
     with tab1:
         st.subheader("大模型 API 配置")
-        # 直接绑定 session_state key，避免手动同步在 dialog 作用域下不可靠
-        st.text_input("API Key", type="password", key="openai_api_key")
+        st.caption("填写 API 地址与模型名，点击「测试连接」验证连通性。")
 
-        col_p, col_m = st.columns(2)
-        with col_p:
-            st.selectbox(
-                "服务商", range(len(providers)),
-                format_func=lambda i: provider_names[i],
-                key="dialog_provider_idx",
-                on_change=sync_provider_callback,
-                args=("dialog_provider_idx",),
-            )
-
-        p_idx = st.session_state.dialog_provider_idx
-        selected_provider_d = providers[p_idx]
-
-        with col_m:
-            if selected_provider_d['id'] == 'custom':
-                st.text_input(
-                    "LLM 模型", value=st.session_state.get('llm_model', ''),
-                    key="dialog_model_custom",
-                    on_change=sync_custom_model_callback,
-                    args=("dialog_model_custom",),
-                )
-            else:
-                models_d = selected_provider_d.get('models', [])
-                if st.session_state.get('llm_model') not in models_d and models_d:
-                    st.session_state.llm_model = models_d[0]
-                model_idx_d = models_d.index(st.session_state.llm_model) \
-                    if st.session_state.get('llm_model') in models_d else 0
-                st.selectbox(
-                    "模型", models_d if models_d else ["(无可用模型)"],
-                    index=model_idx_d,
-                    key="dialog_model",
-                    on_change=sync_model_callback,
-                    args=("dialog_model",),
-                )
-
-        if selected_provider_d['id'] == 'custom':
-            st.text_input("API Base URL", key="openai_base_url")
-        else:
-            st.info(f"📍 默认 Base URL: `{selected_provider_d.get('base_url', '')}`")
+        st.text_input("API Key（本地模型可留空）", type="password", key="openai_api_key")
+        st.text_input("API Base URL（例如 https://api.openai.com/v1）", key="openai_base_url")
+        st.text_input("LLM 模型（例如 gpt-4o-mini）", key="llm_model")
 
         st.markdown("---")
-        col_sync, col_test = st.columns(2)
-        with col_sync:
-            if st.button("🔄 同步最新模型列表", use_container_width=True):
-                with st.spinner("从远程拉取配置中..."):
-                    synced, ok, msg = sync_providers()
-                    if ok:
-                        st.success(msg)
-                        time.sleep(0.5)
-                        st.rerun()
-                    else:
-                        st.error(msg)
+        col_test, col_save = st.columns([1, 1])
         with col_test:
             if st.button("🔍 测试连接", use_container_width=True):
                 with st.spinner("测试 API 连通性..."):
                     ok, msg = check_api_connection(
-                        st.session_state.get('openai_api_key'),
-                        st.session_state.get('openai_base_url'),
-                        st.session_state.get('llm_model'),
+                        st.session_state.get('openai_api_key', '').strip(),
+                        st.session_state.get('openai_base_url', '').strip(),
+                        st.session_state.get('llm_model', '').strip(),
                     )
                     if ok:
                         st.success(msg)
                     else:
                         st.error(msg)
+        with col_save:
+            if st.button("💾 保存配置到文件", type="primary", use_container_width=True):
+                st.session_state.openai_base_url = normalize_base_url(
+                    st.session_state.get('openai_base_url', ''))
+                save_config_to_file()
+                st.success("配置已持久化保存")
+                time.sleep(0.5)
+                st.rerun()
 
         st.markdown("---")
         st.slider("并发请求数（加速生成/检测）", 1, 6,
                   key="dialog_concurrency",
                   help="同时调用大模型的数量，提高速度但可能触发限流。")
 
-        col_save, col_clear = st.columns(2)
-        with col_save:
-            if st.button("💾 保存配置到文件", type="primary", use_container_width=True):
-                save_config_to_file()
-                st.success("配置已持久化保存")
-                time.sleep(0.5)
-                st.rerun()
+        col_clear, _ = st.columns([1, 1])
         with col_clear:
             if st.button("🗑️ 清除本地保存", use_container_width=True):
                 try:
@@ -219,37 +140,13 @@ def global_settings_dialog():
 st.sidebar.header("🛡️ Sentinel-Edu")
 st.sidebar.subheader("快捷配置")
 
-st.sidebar.selectbox(
-    "服务商", range(len(providers)),
-    format_func=lambda i: provider_names[i],
-    key="sidebar_provider_idx",
-    on_change=sync_provider_callback,
-    args=("sidebar_provider_idx",),
-)
-
-sidebar_p_idx = st.session_state.sidebar_provider_idx
-selected_provider_s = providers[sidebar_p_idx]
-
-if selected_provider_s['id'] == 'custom':
-    st.sidebar.text_input(
-        "模型 (自定义)", value=st.session_state.get('llm_model', ''),
-        key="sidebar_model_custom",
-        on_change=sync_custom_model_callback,
-        args=("sidebar_model_custom",),
-    )
-else:
-    models_s = selected_provider_s.get('models', [])
-    if st.session_state.get('llm_model') not in models_s and models_s:
-        st.session_state.llm_model = models_s[0]
-    model_idx_s = models_s.index(st.session_state.llm_model) \
-        if st.session_state.get('llm_model') in models_s else 0
-    st.sidebar.selectbox(
-        "模型", models_s if models_s else ["(无可用模型)"],
-        index=model_idx_s,
-        key="sidebar_model",
-        on_change=sync_model_callback,
-        args=("sidebar_model",),
-    )
+# 简化为直接输入，不再依赖 provider 下拉列表
+st.sidebar.text_input("API Key", type="password", key="openai_api_key",
+                      help="本地模型可留空")
+st.sidebar.text_input("API Base URL", key="openai_base_url",
+                      help="例如 https://api.openai.com/v1")
+st.sidebar.text_input("LLM 模型", key="llm_model",
+                      help="例如 gpt-4o-mini 或 deepseek-chat")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("状态监控")

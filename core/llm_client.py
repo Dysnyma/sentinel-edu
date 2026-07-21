@@ -32,16 +32,18 @@ class BaseLLMClient:
 
     @classmethod
     def get_instance(cls, api_key: str, base_url: str, model: str) -> 'BaseLLMClient':
-        """获取（或创建）``BaseLLMClient`` 实例，相同 ``(api_key, base_url)`` 复用同一实例。
+        """获取（或创建）``BaseLLMClient`` 实例。
 
+        缓存 key 包含 ``model``，避免不同模型复用同一实例导致调用时使用错误的模型。
         线程安全，使用 double-check locking 避免重复创建。
-        不同 API 密钥 / Base URL 的客户端互相隔离。
         """
-        key = (api_key, base_url)
+        api_key_norm = api_key.strip()
+        base_url_norm = normalize_base_url(base_url)
+        key = (api_key_norm, base_url_norm, model)
         if key not in cls._instance_cache:
             with cls._lock:
                 if key not in cls._instance_cache:
-                    cls._instance_cache[key] = cls(api_key, base_url, model)
+                    cls._instance_cache[key] = cls(api_key_norm, base_url_norm, model)
         return cls._instance_cache[key]
 
     # ------------------------------------------------------------------
