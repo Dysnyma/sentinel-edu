@@ -144,8 +144,8 @@ _normalized_base_url = normalize_base_url(st.session_state.get('openai_base_url'
 _api_key = st.session_state.get('openai_api_key', '').strip()
 _llm_model = st.session_state.get('llm_model', '').strip()
 
-# API 就绪只需 Base URL 和模型名，API Key 在测试连接时验证
-api_ready = bool(_normalized_base_url) and bool(_llm_model)
+# API 就绪：Base URL + 模型名 + API Key（本地模型可填任意值）
+api_ready = bool(_normalized_base_url) and bool(_llm_model) and bool(_api_key)
 
 # 显示当前配置摘要
 _current_provider = "DeepSeek" if "deepseek" in (_normalized_base_url or "") else \

@@ -15,7 +15,7 @@ DEFAULT_CONFIG_STATE = {
 # UI 类状态（不持久化到 config.json）
 DEFAULT_UI_STATE = {
     'dialog_concurrency': 3,
-    'use_local_whisper': True,
+    'use_local_whisper': False,
     'local_whisper_model': 'small',
 }
 
