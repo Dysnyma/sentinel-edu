@@ -139,20 +139,23 @@ def global_settings_dialog():
 st.sidebar.header("🛡️ Sentinel-Edu")
 st.sidebar.subheader("快捷配置")
 
-# 计算规范化值用于状态判定（不直接绑定 widget，避免与 dialog 冲突）
+# 计算规范化值用于展示（不绑定 widget，不与 dialog 冲突）
 _normalized_base_url = normalize_base_url(st.session_state.get('openai_base_url', ''))
 _api_key = st.session_state.get('openai_api_key', '').strip()
 _llm_model = st.session_state.get('llm_model', '').strip()
 
-# API 就绪：Base URL + 模型名 + API Key（本地模型可填任意值）
+# API 就绪：同时需要 Base URL + 模型名 + API Key
 api_ready = bool(_normalized_base_url) and bool(_llm_model) and bool(_api_key)
 
-# 显示当前配置摘要
+# 显示当前配置详情（只读）
 _current_provider = "DeepSeek" if "deepseek" in (_normalized_base_url or "") else \
     "SiliconFlow" if "siliconflow" in (_normalized_base_url or "") else \
     "OpenAI" if "openai" in (_normalized_base_url or "") else "自定义"
-st.sidebar.caption(f"当前服务商: {_current_provider}")
-st.sidebar.caption(f"模型: {_llm_model or '(未设置)'}")
+_key_masked = _api_key[:6] + "..." + _api_key[-4:] if len(_api_key) > 12 else bool(_api_key)
+st.sidebar.markdown(f"**服务商:** {_current_provider}")
+st.sidebar.markdown(f"**模型:** `{_llm_model or '(未设置)'}`")
+st.sidebar.markdown(f"**Base URL:** `{_normalized_base_url or '(未设置)'}`")
+st.sidebar.markdown(f"**API Key:** `{_key_masked if _api_key else '(未设置)'}`")
 st.sidebar.markdown(f"{'🟢' if api_ready else '🔴'} **API**: {'已就绪' if api_ready else '未配置'}")
 
 ffmpeg_ready = shutil.which(st.session_state.get('ffmpeg_path', 'ffmpeg')) is not None
