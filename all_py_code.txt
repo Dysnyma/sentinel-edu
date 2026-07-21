@@ -1,6 +1,6 @@
 ========================================
  Sentinel Edu — 全部 Python 源码合并
- 生成时间: 2026-07-21 19:26:13
+ 生成时间: 2026-07-21 19:57:41
  文件总数: 30
 ========================================
 
@@ -18,7 +18,8 @@ import time
 
 from core.config import (
     init_config, save_config_to_file, CONFIG_FILE, load_session_state,
-    load_prompts, save_prompts, load_providers, sync_providers
+    load_prompts, save_prompts, load_providers, sync_providers,
+    normalize_base_url,
 )
 from core.database import init_db
 from core.asr import is_whisper_model_downloaded
@@ -70,7 +71,8 @@ def sync_provider_callback(source):
     if providers[idx]['id'] != 'custom':
         st.session_state.openai_base_url = providers[idx]['base_url']
         models = providers[idx].get('models', [])
-        if models:
+        # 仅当当前模型不在新服务商列表中时回退到首个模型
+        if models and st.session_state.get('llm_model') not in models:
             st.session_state.llm_model = models[0]
 
 def sync_model_callback(source):
@@ -298,9 +300,7 @@ if st.sidebar.button("⚙️ 全局设置", use_container_width=True, type="prim
     global_settings_dialog()
 
 # ---------- 规范化配置并持久化检查 ----------
-base_url = st.session_state.get('openai_base_url', '').strip().rstrip('/')
-if base_url and not base_url.endswith('/v1'):
-    base_url += '/v1'
+base_url = normalize_base_url(st.session_state.get('openai_base_url', ''))
 st.session_state.openai_base_url = base_url
 
 api_key = st.session_state.get('openai_api_key', '').strip()
@@ -987,7 +987,7 @@ def save_corrected_dataset(
 ========================================
  文件: core/config.py
  路径: /home/ckc/projects/sentinel-edu/core/config.py
- 行数: 308
+ 行数: 321
 ========================================
 
 import streamlit as st
@@ -996,6 +996,16 @@ import os
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_base_url(url: str) -> str:
+    """统一标准化 Base URL：去除首尾空白与末尾斜杠，补全 ``/v1`` 后缀。"""
+    url = url.strip().rstrip('/')
+    if not url:
+        return ''
+    if not url.endswith('/v1'):
+        url += '/v1'
+    return url
 
 CONFIG_FILE = os.path.join('data', 'apiconfig.json')
 
@@ -1027,6 +1037,8 @@ def load_config_from_file():
 
 
 def init_config():
+    if '_initialized' in st.session_state:
+        return
     defaults = {
         'openai_api_key': '',
         'openai_base_url': 'https://api.openai.com/v1',
@@ -1037,8 +1049,9 @@ def init_config():
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
-    # 尝试从文件加载（仅在首次初始化时覆盖空值）
+    # 仅在首次初始化时从文件加载已保存的配置
     load_config_from_file()
+    st.session_state['_initialized'] = True
 
 
 # ---- 会话状态持久化 ----
@@ -1953,15 +1966,18 @@ def commit_selected_words(
 ========================================
  文件: core/llm_client.py
  路径: /home/ckc/projects/sentinel-edu/core/llm_client.py
- 行数: 118
+ 行数: 166
 ========================================
 
 """LLM API 客户端基类 — 封装 URL 标准化、指数退避重试、响应提取与 JSON 解析。"""
 
+import threading
+import httpx
 import openai
 import json_repair
 import re
 import time
+from core.config import normalize_base_url
 
 
 class BaseLLMClient:
@@ -1972,21 +1988,46 @@ class BaseLLMClient:
     - messages 的组装（System/User 角色、Prompt 模板渲染）由业务方完成。
     """
 
+    _instance_cache: dict = {}
+    _lock: threading.Lock = threading.Lock()
+
     def __init__(self, api_key: str, base_url: str, model: str):
-        base_url = base_url.strip().rstrip('/')
-        if not base_url.endswith('/v1'):
-            base_url += '/v1'
+        base_url = normalize_base_url(base_url)
         self.base_url = base_url
         self.model = model
         self._client = openai.OpenAI(api_key=api_key.strip(), base_url=base_url)
+
+    # ------------------------------------------------------------------
+    #  工厂方法
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def get_instance(cls, api_key: str, base_url: str, model: str) -> 'BaseLLMClient':
+        """获取（或创建）``BaseLLMClient`` 实例，相同 ``(api_key, base_url)`` 复用同一实例。
+
+        线程安全，使用 double-check locking 避免重复创建。
+        不同 API 密钥 / Base URL 的客户端互相隔离。
+        """
+        key = (api_key, base_url)
+        if key not in cls._instance_cache:
+            with cls._lock:
+                if key not in cls._instance_cache:
+                    cls._instance_cache[key] = cls(api_key, base_url, model)
+        return cls._instance_cache[key]
 
     # ------------------------------------------------------------------
     #  内部方法
     # ------------------------------------------------------------------
 
     def _call_api(self, messages, *, temperature=0.0, max_tokens=512, timeout=30):
-        """带指数退避重试的 API 调用，返回原始响应对象。"""
+        """带指数退避重试的 API 调用，返回原始响应对象。
+
+        异常分类:
+        - 可重试: 5xx 服务端错误、429 限流、网络层异常（无 HTTP 状态码）
+        - 不可重试: 4xx 客户端错误（401/403/404/400 等），直接抛出
+        """
         last_exc = None
+        retried = False
         for attempt in range(3):
             try:
                 return self._client.chat.completions.create(
@@ -1996,22 +2037,42 @@ class BaseLLMClient:
                     max_tokens=max_tokens,
                     timeout=timeout,
                 )
-            except openai.APIError as e:
+            except (openai.APIError, httpx.HTTPError, TimeoutError, ConnectionError) as e:
                 last_exc = e
+                status = None
+                if isinstance(e, openai.APIError):
+                    status = getattr(e, 'status_code', None)
+                elif hasattr(e, 'response') and e.response is not None:
+                    try:
+                        status = e.response.status_code
+                    except AttributeError:
+                        pass
+
+                # 4xx 客户端错误（除 429 限流外）不可重试，立即退出重试循环
+                if status is not None and 400 <= status < 500 and status != 429:
+                    break
+
+                retried = True
                 if attempt < 2:
                     time.sleep(2 ** attempt)
 
         extra = ""
-        if hasattr(last_exc, 'response'):
-            try:
-                extra = (
-                    f"\nHTTP状态: {last_exc.response.status_code}"
-                    f"\n响应体: {last_exc.response.text[:500]}"
-                )
-            except (AttributeError, TypeError):
-                pass
+        if last_exc is not None:
+            if hasattr(last_exc, 'response'):
+                try:
+                    resp = last_exc.response
+                    extra = (
+                        f"\nHTTP状态: {resp.status_code}"
+                        f"\n响应体: {resp.text[:500]}"
+                    )
+                except (AttributeError, TypeError):
+                    pass
+            elif isinstance(last_exc, httpx.HTTPError):
+                extra = f"\n异常类型: {type(last_exc).__name__}"
+
+        label = "（重试3次后）" if retried else ""
         raise ValueError(
-            f"LLM API 调用失败（重试3次后）: model={self.model}, "
+            f"LLM API 调用失败{label}: model={self.model}, "
             f"base_url={self.base_url}, 错误: {last_exc}{extra}"
         ) from last_exc
 
@@ -2112,7 +2173,7 @@ _DEFAULT_SCAN_PROMPT = (
 
 
 def llm_scan(text: str, api_key: str, base_url: str, model: str, dfa_words: list = None) -> dict:
-    client = BaseLLMClient(api_key, base_url, model)
+    client = BaseLLMClient.get_instance(api_key, base_url, model)
     t_start = time.time()
 
     if dfa_words:
@@ -2127,7 +2188,7 @@ def llm_scan(text: str, api_key: str, base_url: str, model: str, dfa_words: list
 
     messages = [
         {"role": "system", "content": "你是内容安全审核专家，只输出 JSON。"},
-        {"role": "user", "content": _get_scan_prompt().replace('{dfa_hint}', dfa_hint).replace('{text}', text)},
+        {"role": "user", "content": _get_scan_prompt().format(dfa_hint=dfa_hint, text=text)},
     ]
 
     result = client.call_and_parse(messages, temperature=0.0, max_tokens=512, timeout=30)
@@ -2174,11 +2235,11 @@ _DEFAULT_POISON_PROMPT = (
 
 
 def generate_poison(text: str, api_key: str, base_url: str, model: str) -> dict:
-    client = BaseLLMClient(api_key, base_url, model)
+    client = BaseLLMClient.get_instance(api_key, base_url, model)
 
     messages = [
         {"role": "system", "content": "你是红队专家，只输出 JSON，不要任何解释。"},
-        {"role": "user", "content": _get_poison_prompt().replace('{text}', text)},
+        {"role": "user", "content": _get_poison_prompt().format(text=text)},
     ]
 
     result = client.call_and_parse(messages, temperature=0.8, max_tokens=1024, timeout=60)
@@ -2397,11 +2458,11 @@ _DEFAULT_CORRECT_PROMPT = (
 
 
 def correct_text(text: str, api_key: str, base_url: str, model: str) -> str:
-    client = BaseLLMClient(api_key, base_url, model)
+    client = BaseLLMClient.get_instance(api_key, base_url, model)
 
     messages = [
         {"role": "system", "content": "你是一个专业的文本校对助手，仅纠正错别字和标点符号，不得改变原句表达。"},
-        {"role": "user", "content": _get_correct_prompt().replace('{text}', text)},
+        {"role": "user", "content": _get_correct_prompt().format(text=text)},
     ]
 
     return client.call(messages, temperature=0.0, max_tokens=1024, timeout=30)
@@ -3443,7 +3504,7 @@ from views.tab4_learn import render_tab4
 ========================================
  文件: views/helpers.py
  路径: /home/ckc/projects/sentinel-edu/views/helpers.py
- 行数: 138
+ 行数: 137
 ========================================
 
 """共享 UI 辅助函数：高亮、上下文截取、颜色映射、JSON 安全解析等"""
@@ -3452,6 +3513,7 @@ import html
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from core.config import normalize_base_url
 
 
 def highlight_toxic(text, toxic_spans, color='#ff4d4d'):
@@ -3523,9 +3585,7 @@ def check_api_connection(api_key, base_url, model):
     """测试大模型 API 连通性，返回 (success, message)"""
     if not api_key or not base_url or not model:
         return False, "请填写 API Key、Base URL 和模型名称。"
-    base_url = base_url.strip().rstrip('/')
-    if not base_url.endswith('/v1'):
-        base_url += '/v1'
+    base_url = normalize_base_url(base_url)
     try:
         import openai
         client = openai.OpenAI(api_key=api_key.strip(), base_url=base_url)

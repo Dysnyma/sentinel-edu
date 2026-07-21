@@ -165,6 +165,8 @@ def global_settings_dialog():
             if st.button("💾 保存配置到文件", type="primary", use_container_width=True):
                 save_config_to_file()
                 st.success("配置已持久化保存")
+                time.sleep(0.5)
+                st.rerun()
         with col_clear:
             if st.button("🗑️ 清除本地保存", use_container_width=True):
                 try:
@@ -266,9 +268,16 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.subheader("状态监控")
 
-api_ready = bool(st.session_state.get('openai_api_key')) and \
-    bool(st.session_state.get('openai_base_url')) and \
-    bool(st.session_state.get('llm_model'))
+# 修复：先清洗再判定 —— 避免带空格的假阳性
+_normalized_base_url = normalize_base_url(st.session_state.get('openai_base_url', ''))
+st.session_state.openai_base_url = _normalized_base_url
+_api_key = st.session_state.get('openai_api_key', '').strip()
+_llm_model = st.session_state.get('llm_model', '').strip()
+
+# 修复：custom 服务商允许 API Key 为空（本地模型场景）
+_is_custom = providers[st.session_state.sidebar_provider_idx]['id'] == 'custom'
+api_ready = bool(_normalized_base_url) and bool(_llm_model) and \
+    (bool(_api_key) or _is_custom)
 st.sidebar.markdown(f"{'🟢' if api_ready else '🔴'} **API**: {'已就绪' if api_ready else '未配置'}")
 
 ffmpeg_ready = shutil.which(st.session_state.get('ffmpeg_path', 'ffmpeg')) is not None
@@ -287,14 +296,8 @@ st.sidebar.markdown("---")
 if st.sidebar.button("⚙️ 全局设置", use_container_width=True, type="primary"):
     global_settings_dialog()
 
-# ---------- 规范化配置并持久化检查 ----------
-base_url = normalize_base_url(st.session_state.get('openai_base_url', ''))
-st.session_state.openai_base_url = base_url
-
-api_key = st.session_state.get('openai_api_key', '').strip()
-llm_model = st.session_state.get('llm_model', '').strip()
-
-_current = {'openai_api_key': api_key, 'openai_base_url': base_url, 'llm_model': llm_model}
+# ---------- 自动持久化配置 ----------
+_current = {'openai_api_key': _api_key, 'openai_base_url': _normalized_base_url, 'llm_model': _llm_model}
 _last_saved = st.session_state.get('_last_saved_config', {})
 if _current != _last_saved:
     save_config_to_file()
@@ -311,11 +314,11 @@ st.markdown("---")
 tab1, tab2, tab3, tab4 = st.tabs(["📦 测试集构建", "🔍 安全检测", "📊 可视化分析", "🧠 自学习优化"])
 
 with tab1:
-    render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
+    render_tab1(api_ready, _api_key, _normalized_base_url, _llm_model, concurrency,
                 use_local_whisper, local_whisper_model)
 
 with tab2:
-    render_tab2(api_ready, api_key, base_url, llm_model, concurrency)
+    render_tab2(api_ready, _api_key, _normalized_base_url, _llm_model, concurrency)
 
 with tab3:
     render_tab3()
