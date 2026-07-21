@@ -5,6 +5,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def normalize_base_url(url: str) -> str:
+    """统一标准化 Base URL：去除首尾空白与末尾斜杠，补全 ``/v1`` 后缀。"""
+    url = url.strip().rstrip('/')
+    if not url:
+        return ''
+    if not url.endswith('/v1'):
+        url += '/v1'
+    return url
+
 CONFIG_FILE = os.path.join('data', 'apiconfig.json')
 
 
@@ -35,6 +45,8 @@ def load_config_from_file():
 
 
 def init_config():
+    if '_initialized' in st.session_state:
+        return
     defaults = {
         'openai_api_key': '',
         'openai_base_url': 'https://api.openai.com/v1',
@@ -45,8 +57,9 @@ def init_config():
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
-    # 尝试从文件加载（仅在首次初始化时覆盖空值）
+    # 仅在首次初始化时从文件加载已保存的配置
     load_config_from_file()
+    st.session_state['_initialized'] = True
 
 
 # ---- 会话状态持久化 ----

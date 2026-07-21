@@ -6,6 +6,7 @@ import openai
 import json_repair
 import re
 import time
+from core.config import normalize_base_url
 
 
 class BaseLLMClient:
@@ -20,9 +21,7 @@ class BaseLLMClient:
     _lock: threading.Lock = threading.Lock()
 
     def __init__(self, api_key: str, base_url: str, model: str):
-        base_url = base_url.strip().rstrip('/')
-        if not base_url.endswith('/v1'):
-            base_url += '/v1'
+        base_url = normalize_base_url(base_url)
         self.base_url = base_url
         self.model = model
         self._client = openai.OpenAI(api_key=api_key.strip(), base_url=base_url)

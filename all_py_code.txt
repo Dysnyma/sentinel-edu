@@ -1,21 +1,25 @@
 ========================================
  Sentinel Edu — 全部 Python 源码合并
- 生成时间: 2026-07-20 13:10:14
- 文件总数: 28
+ 生成时间: 2026-07-21 19:26:13
+ 文件总数: 30
 ========================================
 
 ========================================
  文件: app.py
  路径: /home/ckc/projects/sentinel-edu/app.py
- 行数: 162
+ 行数: 324
 ========================================
 
 """Sentinel-Edu — 课堂思政元素安全性分析原型系统"""
 import streamlit as st
 import os
 import shutil
+import time
 
-from core.config import init_config, save_config_to_file, CONFIG_FILE, load_session_state, load_prompts, save_prompts
+from core.config import (
+    init_config, save_config_to_file, CONFIG_FILE, load_session_state,
+    load_prompts, save_prompts, load_providers, sync_providers
+)
 from core.database import init_db
 from core.asr import is_whisper_model_downloaded
 from views.helpers import check_api_connection
@@ -38,123 +42,281 @@ init_db()
 os.makedirs("data", exist_ok=True)
 os.makedirs("downloads", exist_ok=True)
 
-# ---------- 侧边栏 ----------
-st.sidebar.header("⚙️ 全局配置")
-st.sidebar.subheader("大模型 API")
-api_key = st.sidebar.text_input(
-    "API Key", type="password", value=st.session_state.openai_api_key)
-base_url = st.sidebar.text_input(
-    "API Base URL", value=st.session_state.openai_base_url)
-llm_model = st.sidebar.text_input("LLM 模型", value=st.session_state.llm_model)
-col_save, col_clear = st.sidebar.columns(2)
-with col_save:
-    if st.button("💾 保存配置"):
-        save_config_to_file()
-        st.success("配置已保存")
-with col_clear:
-    if st.button("🗑️ 清除保存"):
-        try:
-            os.remove(CONFIG_FILE)
-            st.success("已清除")
-        except OSError:
-            pass
-if st.sidebar.button("🔍 测试连接"):
-    ok, msg = check_api_connection(api_key, base_url, llm_model)
-    if ok:
-        st.sidebar.success(msg)
-    else:
-        st.sidebar.error(msg)
+if 'dialog_concurrency' not in st.session_state:
+    st.session_state.dialog_concurrency = 3
+if 'use_local_whisper' not in st.session_state:
+    st.session_state.use_local_whisper = True
+if 'local_whisper_model' not in st.session_state:
+    st.session_state.local_whisper_model = 'small'
 
-st.sidebar.caption("若无 API Key，大模型功能不可用。")
+providers = load_providers()
+provider_ids = [p['id'] for p in providers]
+provider_names = [p['name'] for p in providers]
+current_provider_id = st.session_state.get('openai_provider_id', 'openai')
+default_idx = provider_ids.index(current_provider_id) if current_provider_id in provider_ids else 0
 
-# 语音识别设置
-st.sidebar.subheader("语音识别 (ASR)")
-use_local_whisper = st.sidebar.checkbox("使用本地 Whisper 模型（免费，离线）", value=True)
-local_whisper_model = None
-if use_local_whisper:
-    local_whisper_model = st.sidebar.selectbox(
-        "模型大小", ["tiny", "base", "small", "medium", "large"],
-        index=2, help="越大越准确，但更慢更占内存。推荐 small 或 medium。"
+if 'sidebar_provider_idx' not in st.session_state:
+    st.session_state.sidebar_provider_idx = default_idx
+if 'dialog_provider_idx' not in st.session_state:
+    st.session_state.dialog_provider_idx = default_idx
+
+# ---------- 状态双向同步回调 ----------
+def sync_provider_callback(source):
+    target = 'dialog_provider_idx' if source == 'sidebar_provider_idx' else 'sidebar_provider_idx'
+    idx = st.session_state[source]
+    st.session_state[target] = idx
+    st.session_state.openai_provider_id = providers[idx]['id']
+
+    if providers[idx]['id'] != 'custom':
+        st.session_state.openai_base_url = providers[idx]['base_url']
+        models = providers[idx].get('models', [])
+        if models:
+            st.session_state.llm_model = models[0]
+
+def sync_model_callback(source):
+    target = 'dialog_model' if source == 'sidebar_model' else 'sidebar_model'
+    st.session_state[target] = st.session_state[source]
+    st.session_state.llm_model = st.session_state[source]
+
+def sync_custom_model_callback(source):
+    target = 'dialog_model_custom' if source == 'sidebar_model_custom' else 'sidebar_model_custom'
+    st.session_state[target] = st.session_state[source]
+    st.session_state.llm_model = st.session_state[source]
+
+# ---------- 全局设置模态弹窗 ----------
+@st.dialog("⚙️ 全局系统设置", width="large")
+def global_settings_dialog():
+    tab1, tab2, tab3 = st.tabs(["🔌 API 与网络", "🛠️ 本地工具", "🧠 提示词工程"])
+
+    with tab1:
+        st.subheader("大模型 API 配置")
+        new_api_key = st.text_input("API Key", type="password",
+                                    value=st.session_state.get('openai_api_key', ''),
+                                    key="dialog_api_key_input")
+        if new_api_key != st.session_state.get('openai_api_key', ''):
+            st.session_state.openai_api_key = new_api_key
+
+        col_p, col_m = st.columns(2)
+        with col_p:
+            st.selectbox(
+                "服务商", range(len(providers)),
+                format_func=lambda i: provider_names[i],
+                key="dialog_provider_idx",
+                on_change=sync_provider_callback,
+                args=("dialog_provider_idx",),
+            )
+
+        p_idx = st.session_state.dialog_provider_idx
+        selected_provider_d = providers[p_idx]
+
+        with col_m:
+            if selected_provider_d['id'] == 'custom':
+                st.text_input(
+                    "LLM 模型", value=st.session_state.get('llm_model', ''),
+                    key="dialog_model_custom",
+                    on_change=sync_custom_model_callback,
+                    args=("dialog_model_custom",),
+                )
+            else:
+                models_d = selected_provider_d.get('models', [])
+                if st.session_state.get('llm_model') not in models_d and models_d:
+                    st.session_state.llm_model = models_d[0]
+                model_idx_d = models_d.index(st.session_state.llm_model) \
+                    if st.session_state.get('llm_model') in models_d else 0
+                st.selectbox(
+                    "模型", models_d if models_d else ["(无可用模型)"],
+                    index=model_idx_d,
+                    key="dialog_model",
+                    on_change=sync_model_callback,
+                    args=("dialog_model",),
+                )
+
+        if selected_provider_d['id'] == 'custom':
+            new_base = st.text_input("API Base URL",
+                                     value=st.session_state.get('openai_base_url', ''),
+                                     key="dialog_base_url_input")
+            if new_base != st.session_state.get('openai_base_url', ''):
+                st.session_state.openai_base_url = new_base
+        else:
+            st.info(f"📍 默认 Base URL: `{selected_provider_d.get('base_url', '')}`")
+
+        st.markdown("---")
+        col_sync, col_test = st.columns(2)
+        with col_sync:
+            if st.button("🔄 同步最新模型列表", use_container_width=True):
+                with st.spinner("从远程拉取配置中..."):
+                    synced, ok, msg = sync_providers()
+                    if ok:
+                        st.success(msg)
+                        time.sleep(0.5)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+        with col_test:
+            if st.button("🔍 测试连接", use_container_width=True):
+                with st.spinner("测试 API 连通性..."):
+                    ok, msg = check_api_connection(
+                        st.session_state.get('openai_api_key'),
+                        st.session_state.get('openai_base_url'),
+                        st.session_state.get('llm_model'),
+                    )
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+
+        st.markdown("---")
+        st.slider("并发请求数（加速生成/检测）", 1, 6,
+                  key="dialog_concurrency",
+                  help="同时调用大模型的数量，提高速度但可能触发限流。")
+
+        col_save, col_clear = st.columns(2)
+        with col_save:
+            if st.button("💾 保存配置到文件", type="primary", use_container_width=True):
+                save_config_to_file()
+                st.success("配置已持久化保存")
+        with col_clear:
+            if st.button("🗑️ 清除本地保存", use_container_width=True):
+                try:
+                    os.remove(CONFIG_FILE)
+                    st.success("已清除本地保存的配置")
+                except OSError:
+                    pass
+
+    with tab2:
+        st.subheader("语音识别 (ASR)")
+        st.checkbox("使用本地 Whisper 模型（免费，离线）", key="use_local_whisper")
+        if st.session_state.use_local_whisper:
+            st.selectbox(
+                "模型大小", ["tiny", "base", "small", "medium", "large"],
+                key="local_whisper_model",
+                help="越大越准确，但更慢更占内存。推荐 small 或 medium。",
+            )
+            if is_whisper_model_downloaded(st.session_state.local_whisper_model):
+                st.caption(f"✅ Whisper {st.session_state.local_whisper_model} 模型已下载")
+            else:
+                st.caption(f"📥 Whisper {st.session_state.local_whisper_model} 模型未下载，首次使用时将自动下载")
+
+        st.markdown("---")
+        st.subheader("系统工具路径")
+        st.text_input("FFmpeg 自定义路径", key="ffmpeg_path")
+        st.text_input("BBDown 自定义路径", key="bbdown_path")
+
+    with tab3:
+        if 'prompts' not in st.session_state:
+            st.session_state['prompts'] = load_prompts()
+
+        st.subheader("🤖 提示词编辑（热重载）")
+        st.caption("编辑后点击保存，下次 LLM 调用即生效")
+
+        scan = st.text_area("🛡️ 扫描提示词 (SCAN_PROMPT)",
+                            value=st.session_state['prompts'].get('scan_prompt', ''),
+                            height=200)
+        poison = st.text_area("🦠 投毒提示词 (POISON_PROMPT)",
+                              value=st.session_state['prompts'].get('poison_prompt', ''),
+                              height=200)
+        correct = st.text_area("✏️ 纠错提示词 (CORRECT_PROMPT)",
+                               value=st.session_state['prompts'].get('correct_prompt', ''),
+                               height=200)
+
+        col_reset, col_save_p = st.columns(2)
+        with col_reset:
+            if st.button("↩️ 恢复默认", use_container_width=True):
+                from core.config import _default_prompts
+                defaults = _default_prompts()
+                st.session_state['prompts'] = defaults
+                save_prompts(**defaults)
+                st.rerun()
+        with col_save_p:
+            if st.button("💾 保存并应用提示词", type="primary", use_container_width=True):
+                st.session_state['prompts'] = {
+                    'scan_prompt': scan,
+                    'poison_prompt': poison,
+                    'correct_prompt': correct,
+                }
+                save_prompts(scan, poison, correct)
+                st.success("✅ 提示词已保存")
+
+# ---------- 快捷侧边栏 ----------
+st.sidebar.header("🛡️ Sentinel-Edu")
+st.sidebar.subheader("快捷配置")
+
+st.sidebar.selectbox(
+    "服务商", range(len(providers)),
+    format_func=lambda i: provider_names[i],
+    key="sidebar_provider_idx",
+    on_change=sync_provider_callback,
+    args=("sidebar_provider_idx",),
+)
+
+sidebar_p_idx = st.session_state.sidebar_provider_idx
+selected_provider_s = providers[sidebar_p_idx]
+
+if selected_provider_s['id'] == 'custom':
+    st.sidebar.text_input(
+        "模型 (自定义)", value=st.session_state.get('llm_model', ''),
+        key="sidebar_model_custom",
+        on_change=sync_custom_model_callback,
+        args=("sidebar_model_custom",),
     )
-    if is_whisper_model_downloaded(local_whisper_model):
-        st.sidebar.caption(f"✅ Whisper {local_whisper_model} 模型已下载")
-    else:
-        st.sidebar.caption(f"📥 Whisper {local_whisper_model} 模型未下载，首次使用时将自动下载")
+else:
+    models_s = selected_provider_s.get('models', [])
+    if st.session_state.get('llm_model') not in models_s and models_s:
+        st.session_state.llm_model = models_s[0]
+    model_idx_s = models_s.index(st.session_state.llm_model) \
+        if st.session_state.get('llm_model') in models_s else 0
+    st.sidebar.selectbox(
+        "模型", models_s if models_s else ["(无可用模型)"],
+        index=model_idx_s,
+        key="sidebar_model",
+        on_change=sync_model_callback,
+        args=("sidebar_model",),
+    )
 
-# 工具状态
-st.sidebar.subheader("系统工具状态")
-ffmpeg_available = shutil.which(st.session_state.ffmpeg_path) is not None
-bbdown_available = shutil.which(st.session_state.bbdown_path) is not None
-st.sidebar.caption(
-    f"{'✅' if ffmpeg_available else '❌'} FFmpeg: {'可用' if ffmpeg_available else '未找到'}")
-st.sidebar.caption(
-    f"{'✅' if bbdown_available else '❌'} BBDown: {'可用' if bbdown_available else '未找到'}")
+st.sidebar.markdown("---")
+st.sidebar.subheader("状态监控")
 
-with st.sidebar.expander("⚙️ 高级工具配置（可选）"):
-    new_ffmpeg = st.text_input(
-        "FFmpeg 自定义路径", value=st.session_state.ffmpeg_path)
-    new_bbdown = st.text_input(
-        "BBDown 自定义路径", value=st.session_state.bbdown_path)
-    if new_ffmpeg != st.session_state.ffmpeg_path:
-        st.session_state.ffmpeg_path = new_ffmpeg
-    if new_bbdown != st.session_state.bbdown_path:
-        st.session_state.bbdown_path = new_bbdown
+api_ready = bool(st.session_state.get('openai_api_key')) and \
+    bool(st.session_state.get('openai_base_url')) and \
+    bool(st.session_state.get('llm_model'))
+st.sidebar.markdown(f"{'🟢' if api_ready else '🔴'} **API**: {'已就绪' if api_ready else '未配置'}")
 
-concurrency = st.sidebar.slider("并发请求数（加速生成/检测）", 1, 6, 3,
-                                help="同时调用大模型的数量，提高速度但可能触发限流。")
+ffmpeg_ready = shutil.which(st.session_state.get('ffmpeg_path', 'ffmpeg')) is not None
+st.sidebar.markdown(f"{'🟢' if ffmpeg_ready else '🔴'} **FFmpeg**: {'可用' if ffmpeg_ready else '未找到'}")
 
-# ── 提示词编辑器 ────────────────────────────────────────────
-if 'prompts' not in st.session_state:
-    st.session_state['prompts'] = load_prompts()
+bbdown_ready = shutil.which(st.session_state.get('bbdown_path', './BBDown')) is not None
+st.sidebar.markdown(f"{'🟢' if bbdown_ready else '🔴'} **BBDown**: {'可用' if bbdown_ready else '未找到'}")
 
-with st.sidebar.expander("🤖 提示词编辑（热重载）"):
-    st.caption("编辑后点击保存，下次 LLM 调用即生效")
-    scan = st.text_area("🛡️ 扫描提示词 (SCAN_PROMPT)",
-                        st.session_state['prompts'].get('scan_prompt', ''),
-                        height=200)
-    poison = st.text_area("🦠 投毒提示词 (POISON_PROMPT)",
-                          st.session_state['prompts'].get('poison_prompt', ''),
-                          height=200)
-    correct = st.text_area("✏️ 纠错提示词 (CORRECT_PROMPT)",
-                           st.session_state['prompts'].get('correct_prompt', ''),
-                           height=200)
-    col_reset, col_save = st.columns(2)
-    with col_reset:
-        if st.button("↩️ 恢复默认", use_container_width=True):
-            from core.config import _default_prompts
-            defaults = _default_prompts()
-            st.session_state['prompts'] = defaults
-            save_prompts(**defaults)
-            st.rerun()
-    with col_save:
-        if st.button("💾 保存并应用", type="primary", use_container_width=True):
-            st.session_state['prompts'] = {
-                'scan_prompt': scan,
-                'poison_prompt': poison,
-                'correct_prompt': correct,
-            }
-            save_prompts(scan, poison, correct)
-            st.success("✅ 已保存，将在下次 LLM 调用时生效")
+if st.session_state.use_local_whisper:
+    whisper_ready = is_whisper_model_downloaded(st.session_state.local_whisper_model)
+    st.sidebar.markdown(f"{'🟢' if whisper_ready else '🟡'} **Whisper**: {'已下载' if whisper_ready else '待下载'}")
+else:
+    st.sidebar.markdown("⚪ **Whisper**: 走云端 API")
 
-# 规范化 base_url：补全 /v1 后缀
-base_url = base_url.strip().rstrip('/')
+st.sidebar.markdown("---")
+if st.sidebar.button("⚙️ 全局设置", use_container_width=True, type="primary"):
+    global_settings_dialog()
+
+# ---------- 规范化配置并持久化检查 ----------
+base_url = st.session_state.get('openai_base_url', '').strip().rstrip('/')
 if base_url and not base_url.endswith('/v1'):
     base_url += '/v1'
-
-# 更新 session_state，仅在变化时自动保存
-st.session_state.openai_api_key = api_key.strip()
 st.session_state.openai_base_url = base_url
-st.session_state.llm_model = llm_model.strip()
+
+api_key = st.session_state.get('openai_api_key', '').strip()
+llm_model = st.session_state.get('llm_model', '').strip()
+
+_current = {'openai_api_key': api_key, 'openai_base_url': base_url, 'llm_model': llm_model}
 _last_saved = st.session_state.get('_last_saved_config', {})
-_current = {'openai_api_key': api_key,
-            'openai_base_url': base_url, 'llm_model': llm_model}
 if _current != _last_saved:
     save_config_to_file()
     st.session_state['_last_saved_config'] = _current
 
-api_ready = bool(api_key) and bool(base_url) and bool(llm_model)
+concurrency = st.session_state.dialog_concurrency
+use_local_whisper = st.session_state.use_local_whisper
+local_whisper_model = st.session_state.local_whisper_model
 
-# ---------- 主界面 ----------
+# ---------- 主界面渲染 ----------
 st.title("🛡️ 课堂思政元素安全性分析原型系统")
 st.markdown("---")
 
@@ -825,7 +987,7 @@ def save_corrected_dataset(
 ========================================
  文件: core/config.py
  路径: /home/ckc/projects/sentinel-edu/core/config.py
- 行数: 176
+ 行数: 308
 ========================================
 
 import streamlit as st
@@ -1005,11 +1167,143 @@ def save_prompts(scan_prompt: str, poison_prompt: str, correct_prompt: str):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+# ---- 模型服务商配置 ----
+
+PROVIDERS_FILE = os.path.join('data', 'providers.json')
+
+_DEFAULT_PROVIDERS = [
+    {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1",
+     "models": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o3-mini", "o1"]},
+    {"id": "deepseek", "name": "DeepSeek", "base_url": "https://api.deepseek.com",
+     "models": ["deepseek-v4-flash", "deepseek-v4-pro"]},
+    {"id": "siliconflow", "name": "硅基流动 (SiliconFlow)",
+     "base_url": "https://api.siliconflow.cn/v1",
+     "models": ["deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-R1", "Qwen/Qwen3-235B-A22B"]},
+    {"id": "moonshot", "name": "Moonshot (Kimi)",
+     "base_url": "https://api.moonshot.cn/v1",
+     "models": ["moonshot-v1-8k", "moonshot-v1-32k"]},
+    {"id": "groq", "name": "Groq", "base_url": "https://api.groq.com/openai/v1",
+     "models": ["llama-4.5-scout-17b-16e-instruct", "llama-4.3-scout-8b-8e-instruct"]},
+    {"id": "custom", "name": "自定义", "base_url": "", "models": []},
+]
+
+
+def load_providers() -> list[dict]:
+    """读取 ``data/providers.json``，不存在时用内置默认值创建并返回。"""
+    if os.path.exists(PROVIDERS_FILE):
+        try:
+            with open(PROVIDERS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, list) and len(data) > 0:
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    providers = _DEFAULT_PROVIDERS
+    os.makedirs('data', exist_ok=True)
+    with open(PROVIDERS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(providers, f, ensure_ascii=False, indent=2)
+    return providers
+
+
+_SYNC_SOURCES = [
+    # 1-2: 官方直连 + jsDelivr CDN（国外/VPN 环境）
+    "https://raw.githubusercontent.com/Dysnyma/sentinel-edu/main/data/providers.json",
+    "https://cdn.jsdelivr.net/gh/Dysnyma/sentinel-edu@main/data/providers.json",
+    # 3-5: 国内可用镜像源（依次尝试）
+    "https://ghproxy.net/https://raw.githubusercontent.com/Dysnyma/sentinel-edu/main/data/providers.json",
+    "https://gh-proxy.com/https://raw.githubusercontent.com/Dysnyma/sentinel-edu/main/data/providers.json",
+    "https://xget.xi-xu.me/gh/Dysnyma/sentinel-edu/main/data/providers.json",
+]
+
+
+def sync_providers() -> tuple[list[dict], bool, str]:
+    """从远程拉取最新服务商配置，合并到本地后保存。
+
+    按 ``_SYNC_SOURCES`` 列表顺序依次尝试，成功一个即返回。
+    可通过环境变量 ``SENTINEL_SYNC_URL`` 覆盖为自定义地址（最高优先级）。
+
+    合并策略：
+    - 按 ``id`` 匹配：直接覆盖 ``models`` 列表（实现远程下架效果）
+    - ``custom`` 始终保留不动
+    - 远程新增的服务商自动追加
+
+    返回 ``(providers, success, message)``。
+    """
+    import urllib.request
+    import os as _os
+
+    # 构建 fallback 链
+    env_url = _os.environ.get('SENTINEL_SYNC_URL', '').strip()
+    sources = ([env_url] if env_url else []) + list(_SYNC_SOURCES)
+
+    remote = None
+    last_error = ""
+    for i, url in enumerate(sources):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "sentinel-edu"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                remote = json.loads(resp.read().decode('utf-8'))
+            last_error = ""
+            break
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    if remote is None:
+        return load_providers(), False, (
+            f"同步失败（已尝试 {len(sources)} 个源）\n"
+            f"最后错误: {last_error}\n\n"
+            "💡 可尝试：1. 检查网络连接 2. 设置 HTTPS_PROXY 环境变量 "
+            "3. 在「自定义」中手动配置")
+
+    if not isinstance(remote, list):
+        return load_providers(), False, "远程数据格式错误（期望数组）"
+
+    local = load_providers()
+    local_by_id = {p['id']: p for p in local}
+
+    merged = []
+    seen_ids = set()
+    for rp in remote:
+        pid = rp['id']
+        seen_ids.add(pid)
+        if pid == 'custom':
+            continue
+        if pid in local_by_id:
+            lp = local_by_id[pid]
+            merged.append({
+                "id": pid,
+                "name": lp['name'],
+                "base_url": rp.get('base_url', lp.get('base_url', '')),
+                "models": rp.get('models', []),
+            })
+        else:
+            merged.append(rp)
+
+    # 追加本地有但远程没有的服务商（可能自建的私有提供商）
+    for lid, lp in local_by_id.items():
+        if lid not in seen_ids and lid != 'custom':
+            merged.append(lp)
+
+    # custom 始终在最后
+    if 'custom' in local_by_id:
+        merged.append(local_by_id['custom'])
+    else:
+        merged.append({"id": "custom", "name": "自定义", "base_url": "", "models": []})
+
+    _os.makedirs('data', exist_ok=True)
+    with open(PROVIDERS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(merged, f, ensure_ascii=False, indent=2)
+
+    new_count = len(merged)
+    return merged, True, f"同步成功，共 {new_count} 个服务商"
+
+
 
 ========================================
  文件: core/database.py
  路径: /home/ckc/projects/sentinel-edu/core/database.py
- 行数: 114
+ 行数: 119
 ========================================
 
 import sqlite3
@@ -1066,30 +1360,35 @@ def init_db():
 
 def save_result(text_id, true_label, dfa_pred, llm_pred, hit_words, dfa_time, llm_time,
                 llm_spans=None, llm_reason=None, dataset_id=None, text=None):
-    """保存检测结果。已有的非默认值（非 -1 / 空字符串）会被保留。"""
+    """原子化 UPSERT：消除 SELECT→INSERT 之间的 TOCTOU 竞态条件。
+
+    已有的非默认值（dfa_pred/llm_pred=-1、hit_words/spans/reason=None）会被保留，
+    不会覆盖数据库中已写入的值。
+    """
     conn = _connect()
     c = conn.cursor()
-    c.execute("SELECT dfa_pred, llm_pred, hit_words, llm_spans, llm_reason FROM results WHERE text_id = ?", (text_id,))
-    row = c.fetchone()
-    if row:
-        ex_dfa, ex_llm, ex_hw, ex_ls, ex_reason = row
-        final_dfa = dfa_pred if dfa_pred != -1 else ex_dfa
-        final_llm = llm_pred if llm_pred != -1 else ex_llm
-        final_hw = json.dumps(hit_words, ensure_ascii=False) if hit_words is not None else ex_hw
-        final_ls = json.dumps(llm_spans or [], ensure_ascii=False) if llm_spans is not None else ex_ls
-        final_reason = llm_reason if llm_reason is not None else ex_reason
-    else:
-        final_dfa = dfa_pred
-        final_llm = llm_pred
-        final_hw = json.dumps(hit_words, ensure_ascii=False)
-        final_ls = json.dumps(llm_spans or [], ensure_ascii=False)
-        final_reason = llm_reason or ''
-    c.execute('''INSERT OR REPLACE INTO results
+    c.execute('''INSERT INTO results
                  (text_id, true_label, dfa_pred, llm_pred, hit_words, dfa_time, llm_time,
                   llm_spans, llm_reason, dataset_id, text)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
-              (text_id, true_label, final_dfa, final_llm, final_hw, dfa_time, llm_time,
-               final_ls, final_reason or '', dataset_id, text))
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                 ON CONFLICT(text_id) DO UPDATE SET
+                     true_label = excluded.true_label,
+                     dfa_pred   = CASE WHEN excluded.dfa_pred != -1  THEN excluded.dfa_pred  ELSE results.dfa_pred END,
+                     llm_pred   = CASE WHEN excluded.llm_pred != -1  THEN excluded.llm_pred  ELSE results.llm_pred END,
+                     hit_words  = COALESCE(excluded.hit_words,  results.hit_words),
+                     llm_spans  = COALESCE(excluded.llm_spans,  results.llm_spans),
+                     llm_reason = COALESCE(excluded.llm_reason, results.llm_reason),
+                     dfa_time   = excluded.dfa_time,
+                     llm_time   = excluded.llm_time,
+                     dataset_id = excluded.dataset_id,
+                     text       = excluded.text''',
+              (text_id, true_label,
+               dfa_pred, llm_pred,
+               json.dumps(hit_words, ensure_ascii=False) if hit_words is not None else None,
+               dfa_time, llm_time,
+               json.dumps(llm_spans or [], ensure_ascii=False) if llm_spans is not None else None,
+               llm_reason,
+               dataset_id, text))
     conn.commit()
     conn.close()
 
@@ -1336,7 +1635,7 @@ def _safe_load_jsonl(value):
 ========================================
  文件: core/dfa_scanner.py
  路径: /home/ckc/projects/sentinel-edu/core/dfa_scanner.py
- 行数: 211
+ 行数: 216
 ========================================
 
 """增强型 DFA 扫描器：AC 自动机 + 反混淆 + 拼音同音匹配 + 形近字映射 + 模糊兜底"""
@@ -1415,8 +1714,9 @@ class DFAScanner:
         # 加载后用于模糊匹配的原词列表
         self._words = []
         self._load(words_file)
-        self.automaton.make_automaton()
-        self.pinyin_automaton.make_automaton()
+        if self._words:
+            self.automaton.make_automaton()
+            self.pinyin_automaton.make_automaton()
 
     def _load(self, file_path):
         self._words = []
@@ -1440,8 +1740,9 @@ class DFAScanner:
         self.automaton = ahocorasick.Automaton()
         self.pinyin_automaton = ahocorasick.Automaton()
         self._load(self.words_file)
-        self.automaton.make_automaton()
-        self.pinyin_automaton.make_automaton()
+        if self._words:
+            self.automaton.make_automaton()
+            self.pinyin_automaton.make_automaton()
 
     # ---------- 反混淆预处理 ----------
 
@@ -1509,6 +1810,9 @@ class DFAScanner:
         4. 模糊匹配兜底（rapidfuzz, threshold=90）
         返回 (是否命中, 命中词汇列表)
         """
+        if not self._words:
+            return False, []
+
         normalized = self.normalize(text)
         stripped = self._strip_separators(normalized)
         pinyin_text = self._text_to_pinyin(stripped)
@@ -1550,6 +1854,100 @@ class DFAScanner:
                         continue
             filtered.add(word)
         return filtered
+
+
+========================================
+ 文件: core/learn_controller.py
+ 路径: /home/ckc/projects/sentinel-edu/core/learn_controller.py
+ 行数: 86
+========================================
+
+"""自学习控制器 — 封装 tab4_learn.py 中的非 UI 业务逻辑。"""
+
+from core.self_learner import (
+    collect_missed_spans, segment_candidates, score_candidates,
+    deduplicate, get_existing_words, get_context_examples, apply_selected,
+)
+from core.dfa_scanner import DFAScanner
+
+
+def fetch_missed_records(limit: int = 50) -> dict:
+    """从数据库查询 LLM 检出但 DFA 漏报的记录。
+
+    返回::
+        {"spans": list[str], "texts": list[str], "count": int}
+    """
+    spans, texts, count = collect_missed_spans()
+    if limit and count > limit:
+        spans = spans[:limit]
+        texts = texts[:limit]
+        count = limit
+    return {"spans": spans, "texts": texts, "count": count}
+
+
+def analyze_candidates(
+    spans: list[str],
+    texts: list[str],
+    wordlist_path: str = "sensitive_words.txt",
+) -> list[dict]:
+    """编排候选词提取流程：过滤已有词 → 分词 → TF-IDF → 去重。
+
+    返回 ``list[dict]``，每项含 ``word``、``score``、``count`` 等键。
+    """
+    existing = get_existing_words(wordlist_path)
+    candidates = segment_candidates(spans, existing)
+    if not candidates:
+        return []
+    scored = score_candidates(candidates, texts)
+    return deduplicate(scored)
+
+
+def build_candidate_display_data(
+    candidates: list[dict],
+    texts: list[str],
+    max_items: int = 50,
+) -> list[dict]:
+    """将候选词数据转换为 ``st.data_editor`` 可渲染的行格式。
+
+    返回 ``list[dict]``，每项含 ``选择``、``候选词``、``TF-IDF``、
+    ``出现次数``、``上下文示例`` 键。
+    """
+    rows = []
+    for c in candidates[:max_items]:
+        examples = get_context_examples(c['word'], texts)
+        ctx_str = ' | '.join(examples[:2]) if examples else '—'
+        rows.append({
+            '选择': False,
+            '候选词': c['word'],
+            'TF-IDF': c['score'],
+            '出现次数': c['count'],
+            '上下文示例': ctx_str[:120],
+        })
+    return rows
+
+
+def commit_selected_words(
+    selected_words: list[str],
+    wordlist_path: str = "sensitive_words.txt",
+) -> dict:
+    """将勾选的候选词写入词库并重载 DFA 扫描器。
+
+    返回::
+        {"added_count": int, "new_words": list[str], "reload_success": bool}
+    """
+    added_count, new_words = apply_selected(selected_words, wordlist_path)
+    reload_success = False
+    if added_count > 0:
+        try:
+            DFAScanner(wordlist_path).reload()
+            reload_success = True
+        except Exception:
+            reload_success = False
+    return {
+        "added_count": added_count,
+        "new_words": new_words,
+        "reload_success": reload_success,
+    }
 
 
 ========================================
@@ -2545,6 +2943,138 @@ class TestInlineDetect:
 
 
 ========================================
+ 文件: tests/test_dfa_scanner.py
+ 路径: /home/ckc/projects/sentinel-edu/tests/test_dfa_scanner.py
+ 行数: 124
+========================================
+
+"""core/dfa_scanner.py 的专项单元测试。"""
+
+import pytest
+from core.dfa_scanner import DFAScanner
+
+
+@pytest.fixture
+def temp_wordlist(tmp_path):
+    """生成临时敏感词文件并返回路径。"""
+    words = [
+        "敏感词", "资本主义", "分辨", "周末", "领土",
+        "六四", "苹果公司", "badword",
+    ]
+    path = tmp_path / "test_words.txt"
+    path.write_text("\n".join(words), encoding="utf-8")
+    return str(path)
+
+
+@pytest.fixture
+def scanner(temp_wordlist):
+    return DFAScanner(temp_wordlist)
+
+
+class TestDFAScanner:
+
+    def test_base_matching(self, scanner):
+        """基础匹配：单关键词与多关键词。"""
+        hit, words = scanner.scan("这是一个敏感词，宣扬资本主义。")
+        assert hit is True
+        assert set(words) == {"敏感词", "资本主义"}
+
+    def test_no_match(self, scanner):
+        """无关键词时返回 False。"""
+        hit, words = scanner.scan("今天天气真好。")
+        assert hit is False
+        assert words == []
+
+    def test_fullwidth_normalization(self, scanner):
+        """全角拉丁字符经 NFKC 归一化后匹配。"""
+        hit, words = scanner.scan("这是ＢＡＤＷＯＲＤ测试")
+        assert hit is True
+        assert "badword" in words
+
+    def test_similar_chars(self, scanner):
+        """形近字映射：辩→辨、未→末、士→土。"""
+        from core.dfa_scanner import DFAScanner as D
+        assert D._normalize_similar_chars("辨别") == "辨别"
+        # "分辩"中的"辩"被映射为"辨" → 匹配"分辨"
+        hit, words = scanner.scan("请分辩是非")
+        assert hit is True
+        assert "分辨" in words
+
+        hit, words = scanner.scan("侵占领士")
+        assert hit is True
+        assert "领土" in words
+
+    def test_separator_bypass(self, scanner):
+        """分隔符绕过：标点、空格、零宽字符。"""
+        hit, words = scanner.scan("资.本  主​义")
+        assert hit is True
+        assert "资本主义" in words
+
+    def test_pinyin_homophone(self, scanner):
+        """拼音同音绕过：同音字替换后拼音自动机命中。"""
+        # "敏感词"的拼音是 min3gan3ci2
+        # "敏敢辞"是同音字组合
+        hit, words = scanner.scan("敏敢辞")
+        assert hit is True
+        assert "敏感词" in words
+
+    def test_fuzzy_matching(self, scanner):
+        """编辑距离模糊匹配兜底（单字替换）。"""
+        # "资本主义" vs "资苯主义" — 苯/本 一字之差，partial_ratio 应 ≥90
+        hit, words = scanner.scan("宣扬资苯主义")
+        assert hit is True
+        assert "资本主义" in words
+
+    def test_false_positive_filter(self, scanner):
+        """数字语境下的「六四」放行。"""
+        hit, words = scanner.scan("发生在一九八九年的六四事件")
+        assert hit is True
+        assert "六四" in words
+
+        hit, words = scanner.scan("我的电话尾号是五六四三")
+        assert hit is False
+        assert "六四" not in words
+
+    def test_empty_wordlist(self, tmp_path):
+        """空词表：无敏感词时扫描一切返回 False。"""
+        empty = tmp_path / "empty.txt"
+        empty.write_text("", encoding="utf-8")
+        s = DFAScanner(str(empty))
+        hit, words = s.scan("任何文本")
+        assert hit is False
+        assert words == []
+
+    def test_reload(self, temp_wordlist, scanner):
+        """动态追加词表后 reload 生效。"""
+        hit, words = scanner.scan("新增测试词汇")
+        assert hit is False
+
+        with open(temp_wordlist, "a", encoding="utf-8") as f:
+            f.write("\n新增测试词汇")
+
+        scanner.reload()
+        hit, words = scanner.scan("发现新增测试词汇啦")
+        assert hit is True
+        assert "新增测试词汇" in words
+
+    def test_boundaries(self, scanner):
+        """边界情况：空文本、纯英文、超长文本。"""
+        assert scanner.scan("") == (False, [])
+        assert scanner.scan("Pure english no matches.") == (False, [])
+
+        long_text = "正常文字" * 2000 + "夹杂敏感词" + "正常文字" * 500
+        hit, words = scanner.scan(long_text)
+        assert hit is True
+        assert "敏感词" in words
+
+    def test_scan_without_fuzzy(self, scanner):
+        """关闭模糊匹配时仅依赖 AC 自动机。"""
+        hit, words = scanner.scan("苹国公司", fuzzy=False)
+        # "苹国"与"苹果"编辑距离小，但 fuzzy=False 不启用模糊兜底
+        assert hit is False
+
+
+========================================
  文件: tests/test_llm_client.py
  路径: /home/ckc/projects/sentinel-edu/tests/test_llm_client.py
  行数: 199
@@ -2913,25 +3443,31 @@ from views.tab4_learn import render_tab4
 ========================================
  文件: views/helpers.py
  路径: /home/ckc/projects/sentinel-edu/views/helpers.py
- 行数: 132
+ 行数: 138
 ========================================
 
 """共享 UI 辅助函数：高亮、上下文截取、颜色映射、JSON 安全解析等"""
 
+import html
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def highlight_toxic(text, toxic_spans, color='#ff4d4d'):
-    """将 toxic_spans 中的内容以指定颜色高亮，返回 HTML 字符串"""
+    """将 toxic_spans 中的内容以指定颜色高亮，返回 HTML 字符串。
+
+    安全策略：先 ``html.escape`` 转义全文（防止 XSS），
+    再对转义后的 toxic_spans 做正则匹配高亮。
+    """
     if not toxic_spans:
         return text
-    escaped = [re.escape(span) for span in toxic_spans]
-    pattern = re.compile('|'.join(escaped), re.IGNORECASE)
+    escaped_text = html.escape(text)
+    escaped_spans = [html.escape(re.escape(span)) for span in toxic_spans]
+    pattern = re.compile('|'.join(escaped_spans), re.IGNORECASE)
     return pattern.sub(
         lambda m: f'<mark style="background-color:{color}; color:white; padding:0 2px;">{m.group()}</mark>',
-        text
+        escaped_text
     )
 
 
@@ -4053,17 +4589,18 @@ def render_tab3():
 ========================================
  文件: views/tab4_learn.py
  路径: /home/ckc/projects/sentinel-edu/views/tab4_learn.py
- 行数: 111
+ 行数: 94
 ========================================
 
-"""Tab 4: 自学习优化 — LLM 检出 → 候选词提取 → DFA 词库扩充"""
+"""Tab 4: 自学习优化 — 仅负责 Streamlit UI 组件渲染与 session_state 读写。"""
 
 import streamlit as st
-from core.self_learner import (
-    collect_missed_spans, segment_candidates, score_candidates,
-    deduplicate, get_existing_words, get_context_examples, apply_selected,
+from core.learn_controller import (
+    fetch_missed_records,
+    analyze_candidates,
+    build_candidate_display_data,
+    commit_selected_words,
 )
-from core.dfa_scanner import DFAScanner
 
 
 def render_tab4():
@@ -4074,69 +4611,52 @@ def render_tab4():
     经人工审核后追加到 `sensitive_words.txt`，提升一防覆盖率。
     """)
 
-    # Step 1: 收集漏报数据
+    # ── Step 1: 收集漏报数据 ──────────────────────────────────────
     st.subheader("步骤1：收集 LLM 检出但 DFA 漏报的记录")
     if st.button("📊 查询漏报数据"):
-        spans, texts, count = collect_missed_spans()
-        if count == 0:
+        result = fetch_missed_records(limit=50)
+        if result['count'] == 0:
             st.warning("没有找到 LLM 检出但 DFA 漏掉的记录。请先运行双重检测。")
             return
-        st.session_state['_learn_spans'] = spans
-        st.session_state['_learn_texts'] = texts
-        st.session_state['_learn_count'] = count
-        st.success(f"找到 {count} 条 DFA 漏报记录，共 {len(spans)} 个检出片段")
+        st.session_state['_learn_data'] = result
+        st.success(f"找到 {result['count']} 条 DFA 漏报记录，共 {len(result['spans'])} 个检出片段")
 
-    if '_learn_spans' not in st.session_state:
+    if '_learn_data' not in st.session_state:
         st.info("👆 请先点击上方按钮查询漏报数据")
         return
 
-    spans = st.session_state['_learn_spans']
-    texts = st.session_state['_learn_texts']
-    count = st.session_state['_learn_count']
-    st.caption(f"已加载 {count} 条漏报记录，{len(spans)} 个检出片段")
+    data = st.session_state['_learn_data']
+    st.caption(f"已加载 {data['count']} 条漏报记录，{len(data['spans'])} 个检出片段")
 
-    # Step 2: 分析候选词
+    # ── Step 2: 分析候选词 ────────────────────────────────────────
     st.markdown("---")
     st.subheader("步骤2：提取候选敏感词")
     if st.button("🔬 分析候选词"):
-        existing = get_existing_words()
-        candidates = segment_candidates(spans, existing)
+        candidates = analyze_candidates(data['spans'], data['texts'])
         if not candidates:
             st.warning("未提取到有效候选词（所有片段已被现有词库覆盖或为无效词）")
             return
-        scored = score_candidates(candidates, texts)
-        deduped = deduplicate(scored)
-        st.session_state['_learn_candidates'] = deduped
-        st.success(f"提取到 {len(deduped)} 个候选词（已去重排序）")
+        display_rows = build_candidate_display_data(candidates, data['texts'])
+        st.session_state['_learn_candidates'] = candidates
+        st.session_state['_learn_display_rows'] = display_rows
+        st.success(f"提取到 {len(candidates)} 个候选词（已去重排序）")
 
     if '_learn_candidates' not in st.session_state:
         st.info("👆 请点击上方按钮分析候选词")
         return
 
     candidates = st.session_state['_learn_candidates']
+    display_rows = st.session_state.get('_learn_display_rows', [])
     if not candidates:
         return
 
-    # Step 3: 人工审核
+    # ── Step 3: 人工审核 ──────────────────────────────────────────
     st.markdown("---")
     st.subheader("步骤3：审核并追加到敏感词库")
     st.caption(f"共 {len(candidates)} 个候选词，按 TF-IDF 辨别力降序排列。勾选要加入词库的词。")
 
-    # 展示候选词表格
-    rows = []
-    for c in candidates[:50]:
-        examples = get_context_examples(c['word'], texts)
-        ctx_str = ' | '.join(examples[:2]) if examples else '—'
-        rows.append({
-            '选择': False,
-            '候选词': c['word'],
-            'TF-IDF': c['score'],
-            '出现次数': c['count'],
-            '上下文示例': ctx_str[:120],
-        })
-
     edited = st.data_editor(
-        rows,
+        display_rows,
         column_config={
             '选择': st.column_config.CheckboxColumn(default=False),
             'TF-IDF': st.column_config.NumberColumn(format="%.1f"),
@@ -4151,17 +4671,16 @@ def render_tab4():
 
     if selected:
         st.info(f"已勾选 {len(selected)} 个候选词")
-
         if st.button("➕ 追加到敏感词库", type="primary"):
-            added_count, new_words = apply_selected(selected)
-            if added_count > 0:
-                # 重载 DFA Scanner 使新词立即生效，无需重启应用
-                DFAScanner('sensitive_words.txt').reload()
-                st.success(f"已添加 {added_count} 个新词到 sensitive_words.txt，词库已重载生效")
+            result = commit_selected_words(selected)
+            if result['added_count'] > 0:
+                st.success(
+                    f"已添加 {result['added_count']} 个新词到 sensitive_words.txt"
+                    f"{'，词库已重载生效' if result['reload_success'] else '，但重载失败'}"
+                )
                 with st.expander("查看新增词汇"):
-                    st.write(new_words)
-                # 清理 session 状态以便重新分析
-                for k in ['_learn_spans', '_learn_texts', '_learn_count', '_learn_candidates']:
+                    st.write(result['new_words'])
+                for k in ['_learn_data', '_learn_candidates', '_learn_display_rows']:
                     st.session_state.pop(k, None)
             else:
                 st.info("所选词汇已全部存在于词库中，无需添加")

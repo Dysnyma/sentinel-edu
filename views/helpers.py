@@ -4,6 +4,7 @@ import html
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from core.config import normalize_base_url
 
 
 def highlight_toxic(text, toxic_spans, color='#ff4d4d'):
@@ -75,9 +76,7 @@ def check_api_connection(api_key, base_url, model):
     """测试大模型 API 连通性，返回 (success, message)"""
     if not api_key or not base_url or not model:
         return False, "请填写 API Key、Base URL 和模型名称。"
-    base_url = base_url.strip().rstrip('/')
-    if not base_url.endswith('/v1'):
-        base_url += '/v1'
+    base_url = normalize_base_url(base_url)
     try:
         import openai
         client = openai.OpenAI(api_key=api_key.strip(), base_url=base_url)

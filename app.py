@@ -6,7 +6,8 @@ import time
 
 from core.config import (
     init_config, save_config_to_file, CONFIG_FILE, load_session_state,
-    load_prompts, save_prompts, load_providers, sync_providers
+    load_prompts, save_prompts, load_providers, sync_providers,
+    normalize_base_url,
 )
 from core.database import init_db
 from core.asr import is_whisper_model_downloaded
@@ -58,7 +59,8 @@ def sync_provider_callback(source):
     if providers[idx]['id'] != 'custom':
         st.session_state.openai_base_url = providers[idx]['base_url']
         models = providers[idx].get('models', [])
-        if models:
+        # 仅当当前模型不在新服务商列表中时回退到首个模型
+        if models and st.session_state.get('llm_model') not in models:
             st.session_state.llm_model = models[0]
 
 def sync_model_callback(source):
@@ -286,9 +288,7 @@ if st.sidebar.button("⚙️ 全局设置", use_container_width=True, type="prim
     global_settings_dialog()
 
 # ---------- 规范化配置并持久化检查 ----------
-base_url = st.session_state.get('openai_base_url', '').strip().rstrip('/')
-if base_url and not base_url.endswith('/v1'):
-    base_url += '/v1'
+base_url = normalize_base_url(st.session_state.get('openai_base_url', ''))
 st.session_state.openai_base_url = base_url
 
 api_key = st.session_state.get('openai_api_key', '').strip()
