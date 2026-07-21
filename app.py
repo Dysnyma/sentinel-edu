@@ -62,8 +62,6 @@ def global_settings_dialog():
                         st.error(msg)
         with col_save:
             if st.button("💾 保存配置到文件", type="primary", use_container_width=True):
-                st.session_state.openai_base_url = normalize_base_url(
-                    st.session_state.get('openai_base_url', ''))
                 save_config_to_file()
                 st.success("配置已持久化保存")
                 time.sleep(0.5)
