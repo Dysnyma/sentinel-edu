@@ -30,39 +30,21 @@ init_db()
 os.makedirs("data", exist_ok=True)
 os.makedirs("downloads", exist_ok=True)
 
-def _sync_dlg_api_key():
-    st.session_state.openai_api_key = st.session_state.dlg_api_key
-
-def _sync_dlg_base_url():
-    st.session_state.openai_base_url = st.session_state.dlg_base_url
-
-def _sync_dlg_model():
-    st.session_state.llm_model = st.session_state.dlg_model
-
 # ---------------------------------------------------------------------------
-#  全局设置模态弹窗 — 用 dlg_* key 避免与侧边栏冲突
+#  全局设置模态弹窗
 # ---------------------------------------------------------------------------
 @st.dialog("⚙️ 全局系统设置", width="large")
 def global_settings_dialog():
-    # 清除上次 dialog 的 widget 状态，确保从当前 session_state 重新初始化
-    for _k in ['dlg_api_key', 'dlg_base_url', 'dlg_model']:
-        st.session_state.pop(_k, None)
-
     tab1, tab2, tab3 = st.tabs(["🔌 API 与网络", "🛠️ 本地工具", "🧠 提示词工程"])
 
     with tab1:
         st.subheader("大模型 API 配置")
         st.caption("填写 API 地址与模型名，点击「测试连接」验证连通性。")
 
-        st.text_input("API Key（本地模型可留空）", type="password",
-                       value=st.session_state.get('openai_api_key', ''),
-                       key="dlg_api_key", on_change=_sync_dlg_api_key)
-        st.text_input("API Base URL（例如 https://api.openai.com/v1）",
-                       value=st.session_state.get('openai_base_url', ''),
-                       key="dlg_base_url", on_change=_sync_dlg_base_url)
-        st.text_input("LLM 模型（例如 gpt-4o-mini）",
-                       value=st.session_state.get('llm_model', ''),
-                       key="dlg_model", on_change=_sync_dlg_model)
+        # 唯一编辑入口，直接绑定 session_state（侧边栏不再有 widget 冲突）
+        st.text_input("API Key（本地模型可留空）", type="password", key="openai_api_key")
+        st.text_input("API Base URL（例如 https://api.openai.com/v1）", key="openai_base_url")
+        st.text_input("LLM 模型（例如 gpt-4o-mini）", key="llm_model")
 
         st.markdown("---")
         col_test, col_save = st.columns([1, 1])
@@ -159,24 +141,20 @@ def global_settings_dialog():
 st.sidebar.header("🛡️ Sentinel-Edu")
 st.sidebar.subheader("快捷配置")
 
-# 简化为直接输入，不再依赖 provider 下拉列表
-st.sidebar.text_input("API Key", type="password", key="openai_api_key",
-                      help="本地模型可留空")
-st.sidebar.text_input("API Base URL", key="openai_base_url",
-                      help="例如 https://api.openai.com/v1")
-st.sidebar.text_input("LLM 模型", key="llm_model",
-                      help="例如 gpt-4o-mini 或 deepseek-chat")
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("状态监控")
-
-# 计算规范化值用于判定与传递，不写回 session_state（widget key 绑定后不可覆写）
+# 计算规范化值用于状态判定（不直接绑定 widget，避免与 dialog 冲突）
 _normalized_base_url = normalize_base_url(st.session_state.get('openai_base_url', ''))
 _api_key = st.session_state.get('openai_api_key', '').strip()
 _llm_model = st.session_state.get('llm_model', '').strip()
 
 # API 就绪只需 Base URL 和模型名，API Key 在测试连接时验证
 api_ready = bool(_normalized_base_url) and bool(_llm_model)
+
+# 显示当前配置摘要
+_current_provider = "DeepSeek" if "deepseek" in (_normalized_base_url or "") else \
+    "SiliconFlow" if "siliconflow" in (_normalized_base_url or "") else \
+    "OpenAI" if "openai" in (_normalized_base_url or "") else "自定义"
+st.sidebar.caption(f"当前服务商: {_current_provider}")
+st.sidebar.caption(f"模型: {_llm_model or '(未设置)'}")
 st.sidebar.markdown(f"{'🟢' if api_ready else '🔴'} **API**: {'已就绪' if api_ready else '未配置'}")
 
 ffmpeg_ready = shutil.which(st.session_state.get('ffmpeg_path', 'ffmpeg')) is not None
