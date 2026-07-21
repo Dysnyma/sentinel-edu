@@ -28,7 +28,7 @@ _DEFAULT_SCAN_PROMPT = (
 
 
 def llm_scan(text: str, api_key: str, base_url: str, model: str, dfa_words: list = None) -> dict:
-    client = BaseLLMClient(api_key, base_url, model)
+    client = BaseLLMClient.get_instance(api_key, base_url, model)
     t_start = time.time()
 
     if dfa_words:
@@ -43,7 +43,7 @@ def llm_scan(text: str, api_key: str, base_url: str, model: str, dfa_words: list
 
     messages = [
         {"role": "system", "content": "你是内容安全审核专家，只输出 JSON。"},
-        {"role": "user", "content": _get_scan_prompt().replace('{dfa_hint}', dfa_hint).replace('{text}', text)},
+        {"role": "user", "content": _get_scan_prompt().format(dfa_hint=dfa_hint, text=text)},
     ]
 
     result = client.call_and_parse(messages, temperature=0.0, max_tokens=512, timeout=30)

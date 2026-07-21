@@ -21,11 +21,11 @@ _DEFAULT_CORRECT_PROMPT = (
 
 
 def correct_text(text: str, api_key: str, base_url: str, model: str) -> str:
-    client = BaseLLMClient(api_key, base_url, model)
+    client = BaseLLMClient.get_instance(api_key, base_url, model)
 
     messages = [
         {"role": "system", "content": "你是一个专业的文本校对助手，仅纠正错别字和标点符号，不得改变原句表达。"},
-        {"role": "user", "content": _get_correct_prompt().replace('{text}', text)},
+        {"role": "user", "content": _get_correct_prompt().format(text=text)},
     ]
 
     return client.call(messages, temperature=0.0, max_tokens=1024, timeout=30)

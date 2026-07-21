@@ -31,11 +31,11 @@ _DEFAULT_POISON_PROMPT = (
 
 
 def generate_poison(text: str, api_key: str, base_url: str, model: str) -> dict:
-    client = BaseLLMClient(api_key, base_url, model)
+    client = BaseLLMClient.get_instance(api_key, base_url, model)
 
     messages = [
         {"role": "system", "content": "你是红队专家，只输出 JSON，不要任何解释。"},
-        {"role": "user", "content": _get_poison_prompt().replace('{text}', text)},
+        {"role": "user", "content": _get_poison_prompt().format(text=text)},
     ]
 
     result = client.call_and_parse(messages, temperature=0.8, max_tokens=1024, timeout=60)

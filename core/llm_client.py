@@ -1,5 +1,7 @@
 """LLM API 客户端基类 — 封装 URL 标准化、指数退避重试、响应提取与 JSON 解析。"""
 
+import threading
+import httpx
 import openai
 import json_repair
 import re
@@ -14,6 +16,9 @@ class BaseLLMClient:
     - messages 的组装（System/User 角色、Prompt 模板渲染）由业务方完成。
     """
 
+    _instance_cache: dict = {}
+    _lock: threading.Lock = threading.Lock()
+
     def __init__(self, api_key: str, base_url: str, model: str):
         base_url = base_url.strip().rstrip('/')
         if not base_url.endswith('/v1'):
@@ -23,12 +28,36 @@ class BaseLLMClient:
         self._client = openai.OpenAI(api_key=api_key.strip(), base_url=base_url)
 
     # ------------------------------------------------------------------
+    #  工厂方法
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def get_instance(cls, api_key: str, base_url: str, model: str) -> 'BaseLLMClient':
+        """获取（或创建）``BaseLLMClient`` 实例，相同 ``(api_key, base_url)`` 复用同一实例。
+
+        线程安全，使用 double-check locking 避免重复创建。
+        不同 API 密钥 / Base URL 的客户端互相隔离。
+        """
+        key = (api_key, base_url)
+        if key not in cls._instance_cache:
+            with cls._lock:
+                if key not in cls._instance_cache:
+                    cls._instance_cache[key] = cls(api_key, base_url, model)
+        return cls._instance_cache[key]
+
+    # ------------------------------------------------------------------
     #  内部方法
     # ------------------------------------------------------------------
 
     def _call_api(self, messages, *, temperature=0.0, max_tokens=512, timeout=30):
-        """带指数退避重试的 API 调用，返回原始响应对象。"""
+        """带指数退避重试的 API 调用，返回原始响应对象。
+
+        异常分类:
+        - 可重试: 5xx 服务端错误、429 限流、网络层异常（无 HTTP 状态码）
+        - 不可重试: 4xx 客户端错误（401/403/404/400 等），直接抛出
+        """
         last_exc = None
+        retried = False
         for attempt in range(3):
             try:
                 return self._client.chat.completions.create(
@@ -38,22 +67,42 @@ class BaseLLMClient:
                     max_tokens=max_tokens,
                     timeout=timeout,
                 )
-            except openai.APIError as e:
+            except (openai.APIError, httpx.HTTPError, TimeoutError, ConnectionError) as e:
                 last_exc = e
+                status = None
+                if isinstance(e, openai.APIError):
+                    status = getattr(e, 'status_code', None)
+                elif hasattr(e, 'response') and e.response is not None:
+                    try:
+                        status = e.response.status_code
+                    except AttributeError:
+                        pass
+
+                # 4xx 客户端错误（除 429 限流外）不可重试，立即退出重试循环
+                if status is not None and 400 <= status < 500 and status != 429:
+                    break
+
+                retried = True
                 if attempt < 2:
                     time.sleep(2 ** attempt)
 
         extra = ""
-        if hasattr(last_exc, 'response'):
-            try:
-                extra = (
-                    f"\nHTTP状态: {last_exc.response.status_code}"
-                    f"\n响应体: {last_exc.response.text[:500]}"
-                )
-            except (AttributeError, TypeError):
-                pass
+        if last_exc is not None:
+            if hasattr(last_exc, 'response'):
+                try:
+                    resp = last_exc.response
+                    extra = (
+                        f"\nHTTP状态: {resp.status_code}"
+                        f"\n响应体: {resp.text[:500]}"
+                    )
+                except (AttributeError, TypeError):
+                    pass
+            elif isinstance(last_exc, httpx.HTTPError):
+                extra = f"\n异常类型: {type(last_exc).__name__}"
+
+        label = "（重试3次后）" if retried else ""
         raise ValueError(
-            f"LLM API 调用失败（重试3次后）: model={self.model}, "
+            f"LLM API 调用失败{label}: model={self.model}, "
             f"base_url={self.base_url}, 错误: {last_exc}{extra}"
         ) from last_exc
 
