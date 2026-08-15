@@ -38,7 +38,11 @@ def generate_poison(text: str, api_key: str, base_url: str, model: str) -> dict:
         {"role": "user", "content": _get_poison_prompt().format(text=text)},
     ]
 
-    result = client.call_and_parse(messages, temperature=0.8, max_tokens=1024, timeout=60)
+    try:
+        result = client.call_and_parse(messages, temperature=0.8, max_tokens=1024, timeout=60)
+    except ValueError:
+        # LLM 偶发返回非对象 JSON（如纯字符串/带前缀），重试一次降低失败率
+        result = client.call_and_parse(messages, temperature=0.8, max_tokens=1024, timeout=60)
 
     # 补全缺失字段
     result.setdefault('original_text', text)

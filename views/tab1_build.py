@@ -11,11 +11,57 @@ from core.build_controller import (
     process_bilibili_url,
     run_text_correction,
     run_poison_generation,
-    transcribe_and_save_dataset,
-    save_corrected_dataset,
 )
 from core.utils import texts_to_jsonl, save_dataset, load_jsonl
 from views.helpers import highlight_toxic
+
+PAGE_SIZE = 10
+
+
+def _pager_page(key: str, total: int, page_size: int = PAGE_SIZE) -> tuple[int, int]:
+    """返回 (当前页索引, 总页数)，页码读自 session_state[key]。"""
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = st.session_state.get(key, 0)
+    page = max(0, min(page, pages - 1))
+    return page, pages
+
+
+def _render_pager(key: str, total: int, page_size: int = PAGE_SIZE):
+    """渲染「上一页 / 页码 / 下一页」翻页按钮。"""
+    page, pages = _pager_page(key, total, page_size)
+    col_prev, col_info, col_next = st.columns([1, 2, 1])
+    with col_prev:
+        if st.button("◀ 上一页", disabled=page <= 0, key=f"{key}_prev",
+                     use_container_width=True):
+            st.session_state[key] = page - 1
+            st.rerun()
+    with col_info:
+        st.markdown(f"<div style='text-align:center'>第 {page + 1} / {pages} 页</div>",
+                    unsafe_allow_html=True)
+    with col_next:
+        if st.button("下一页 ▶", disabled=page >= pages - 1, key=f"{key}_next",
+                     use_container_width=True):
+            st.session_state[key] = page + 1
+            st.rerun()
+
+
+def _render_stage_progress() -> tuple:
+    """创建分阶段进度条，返回 ``(stage_cb, update_cb)``。
+
+    - ``stage_cb(text)``：切换阶段时调用，重置进度为 0 并更新阶段文案。
+    - ``update_cb(pct)``：进度更新时调用，保留当前阶段文案。
+    """
+    progress_bar = st.progress(0, text="准备中...")
+    current_stage = {"text": "准备中..."}
+
+    def _stage(text):
+        current_stage["text"] = text
+        progress_bar.progress(0, text=text)
+
+    def _update(pct):
+        progress_bar.progress(pct, text=f"{current_stage['text']} {pct * 100:.0f}%")
+
+    return _stage, _update
 
 
 def _highlight_diff(original: str, corrected: str) -> tuple[str, str]:
@@ -72,33 +118,27 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
             if st.session_state.get('_last_file_id') != file_id:
                 st.session_state['_last_file_id'] = file_id
                 file_bytes = uploaded_file.read()
-                is_video = uploaded_file.name.split('.')[-1].lower() in \
-                    ['mp4', 'flv', 'mkv', 'avi', 'mov', 'webm']
-                with st.spinner("正在提取音频..." if is_video else "正在读取文件..."):
-                    try:
-                        if use_local_whisper and not is_whisper_model_downloaded(local_whisper_model):
-                            st.info(f"📥 首次使用需下载 Whisper {local_whisper_model} 模型（约500MB），请耐心等待...")
-                        progress_bar = st.progress(0, text="正在语音转写... 0%")
-
-                        def _update(pct):
-                            progress_bar.progress(pct, text=f"正在语音转写... {pct * 100:.0f}%")
-
-                        transcript = process_uploaded_file(
-                            file_bytes, uploaded_file.name,
-                            use_local=use_local_whisper,
-                            local_model=local_whisper_model,
-                            ffmpeg_path=st.session_state.ffmpeg_path,
-                            api_key=api_key,
-                            base_url=base_url,
-                            initial_prompt=prompt_text,
-                            progress_callback=_update if use_local_whisper else None,
-                        )
-                        progress_bar.progress(1.0, text="转写完成")
-                        st.success("转写完成")
-                        st.session_state['asr_transcript'] = transcript
-                    except Exception as e:
-                        st.error(f"处理文件失败：{e}")
-                        st.session_state.pop('_last_file_id', None)
+                if use_local_whisper and not is_whisper_model_downloaded(local_whisper_model):
+                    st.info(f"📥 首次使用需下载 Whisper {local_whisper_model} 模型（约500MB），请耐心等待...")
+                stage_cb, update_cb = _render_stage_progress()
+                try:
+                    transcript = process_uploaded_file(
+                        file_bytes, uploaded_file.name,
+                        use_local=use_local_whisper,
+                        local_model=local_whisper_model,
+                        ffmpeg_path=st.session_state.ffmpeg_path,
+                        api_key=api_key,
+                        base_url=base_url,
+                        initial_prompt=prompt_text,
+                        stage_callback=stage_cb,
+                        progress_callback=update_cb if use_local_whisper else None,
+                    )
+                    update_cb(1.0)
+                    st.success("转写完成")
+                    st.session_state['asr_transcript'] = transcript
+                except Exception as e:
+                    st.error(f"处理文件失败：{e}")
+                    st.session_state.pop('_last_file_id', None)
 
             if 'asr_transcript' in st.session_state:
                 edited = st.text_area(
@@ -117,31 +157,26 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
             if not shutil_available():
                 st.error("BBDown 不可用，请检查安装")
             else:
-                with st.spinner("使用 BBDown 下载中..."):
-                    try:
-                        if use_local_whisper and not is_whisper_model_downloaded(local_whisper_model):
-                            st.info(f"📥 首次使用需下载 Whisper {local_whisper_model} 模型（约500MB），请耐心等待...")
-                        progress_bar = st.progress(0, text="处理中... 0%")
-
-                        def _update2(pct):
-                            progress_bar.progress(pct, text=f"处理中... {pct * 100:.0f}%")
-
-                        transcript = process_bilibili_url(
-                            bili_url,
-                            bbdown_path=st.session_state.bbdown_path,
-                            ffmpeg_path=st.session_state.ffmpeg_path,
-                            use_local=use_local_whisper,
-                            local_model=local_whisper_model,
-                            api_key=api_key,
-                            base_url=base_url,
-                            initial_prompt=prompt_text,
-                            progress_callback=_update2 if use_local_whisper else None,
-                        )
-                        progress_bar.progress(1.0, text="完成")
-                        st.success("处理完成")
-                        st.session_state['bili_transcript'] = transcript
-                    except Exception as e:
-                        st.error(f"处理失败：{e}")
+                if use_local_whisper and not is_whisper_model_downloaded(local_whisper_model):
+                    st.info(f"📥 首次使用需下载 Whisper {local_whisper_model} 模型（约500MB），请耐心等待...")
+                stage_cb, update_cb = _render_stage_progress()
+                try:
+                    transcript = process_bilibili_url(
+                        bili_url,
+                        bbdown_path=st.session_state.bbdown_path,
+                        ffmpeg_path=st.session_state.ffmpeg_path,
+                        use_local=use_local_whisper,
+                        local_model=local_whisper_model,
+                        api_key=api_key,
+                        base_url=base_url,
+                        initial_prompt=prompt_text,
+                        progress_callback=update_cb if use_local_whisper else None,
+                    )
+                    update_cb(1.0)
+                    st.success("处理完成")
+                    st.session_state['bili_transcript'] = transcript
+                except Exception as e:
+                    st.error(f"处理失败：{e}")
         if st.session_state.get('bili_transcript'):
             edited = st.text_area("字幕/转写内容", st.session_state['bili_transcript'],
                                   height=150, key="bili_transcript_editor")
@@ -160,19 +195,6 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
     if raw_texts:
         st.session_state['raw_texts'] = raw_texts
         info_placeholder.info(f"已获取 {len(raw_texts)} 条文本片段")
-
-    # ── ASR 完成后自动保存原始数据集 ──────────────────────────────
-    if st.session_state.get('asr_transcript') and not st.session_state.get('_raw_dataset_saved'):
-        try:
-            transcribe_and_save_dataset(
-                st.session_state['asr_transcript'],
-                api_key=api_key if api_ready else "",
-                base_url=base_url if api_ready else "",
-                model=llm_model if api_ready else "",
-            )
-        except Exception:
-            pass
-        st.session_state['_raw_dataset_saved'] = True
 
     # ═══════════════════════════════════════════════════════════════
     #  步骤2：文本纠错
@@ -211,7 +233,10 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
     raw = st.session_state.get('raw_texts')
     if corrected and raw and len(corrected) == len(raw):
         with st.expander(f"📊 纠错前后对比（共 {len(corrected)} 条）"):
-            for i, (orig, corr) in enumerate(zip(raw, corrected)):
+            page, pages = _pager_page("corr_page", len(corrected))
+            start = page * PAGE_SIZE
+            for i in range(start, min(start + PAGE_SIZE, len(corrected))):
+                orig, corr = raw[i], corrected[i]
                 orig_html, corr_html = _highlight_diff(orig, corr)
                 st.markdown(f"**条目 {i + 1}**" + ("（无改动）" if orig == corr else ""))
                 col_l, col_r = st.columns(2)
@@ -222,6 +247,8 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
                     st.caption("纠错后")
                     st.markdown(corr_html, unsafe_allow_html=True)
                 st.markdown("---")
+            if pages > 1:
+                _render_pager("corr_page", len(corrected))
 
     final_texts = st.session_state.get('corrected_texts', st.session_state.get('raw_texts', []))
 
@@ -235,17 +262,15 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
                  help=None if has_final else "等待文本就绪"):
         texts_to_jsonl(final_texts, 'data/clean_corpus.jsonl')
         st.session_state['clean_jsonl'] = 'data/clean_corpus.jsonl'
-        st.success(f"无毒文本已保存至 data/clean_corpus.jsonl，共 {len(final_texts)} 条")
-        # 自动保存纠错后数据集
-        try:
-            save_corrected_dataset(
-                final_texts,
-                api_key=api_key if api_ready else "",
-                base_url=base_url if api_ready else "",
-                model=llm_model if api_ready else "",
-            )
-        except Exception:
-            pass
+        st.session_state['_clean_generated'] = True
+        st.success(f"无毒文本已生成：data/clean_corpus.jsonl，共 {len(final_texts)} 条")
+
+    # ── 生成后数据预览（前 5 条） ─────────────────────────────
+    if st.session_state.get('_clean_generated') and os.path.exists('data/clean_corpus.jsonl'):
+        with st.expander("📋 预览生成的无毒数据（前 5 条）"):
+            preview = load_jsonl('data/clean_corpus.jsonl')[:5]
+            for rec in preview:
+                st.markdown(f"- **id**: `{rec['id']}` | **text**: {rec['text'][:80]}{'…' if len(rec['text']) > 80 else ''}")
 
     # ═══════════════════════════════════════════════════════════════
     #  步骤4：投毒生成
@@ -282,10 +307,12 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
             )
             progress_bar.progress(1.0, text="投毒完成")
 
-            for idx, msg in result['errors']:
-                st.warning(f"第{idx}条投毒失败")
-                with st.expander("查看错误"):
-                    st.text(msg)
+            if result['errors']:
+                st.warning(f"⚠️ 有 {len(result['errors'])} 条投毒失败（已跳过，不影响其他样本）")
+                with st.expander("查看失败详情"):
+                    for idx, msg in result['errors']:
+                        brief = msg if len(msg) <= 120 else msg[:120] + "…"
+                        st.markdown(f"**第 {idx + 1} 条失败**：{brief}")
 
             st.session_state['final_test'] = result['mixed_path']
             st.session_state['_poison_generated'] = True
@@ -305,32 +332,44 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
                 f"投毒完成！共生成 {len(result['poisoned_records'])} 条有毒文本，"
                 f"最终混合集：{result['mixed_path']}")
 
-    # ── 投毒后：保存 + 有毒样本对比 ─────────────────────────────
+    # ── 投毒后：统一保存（无毒 + 有毒） + 有毒样本对比 ─────────
     if st.session_state.get('_poison_generated') and os.path.exists('data/final_test_mixed.jsonl'):
         st.markdown("---")
-        st.subheader("💾 保存测试集")
+        st.subheader("💾 保存测试集（无毒 + 有毒）")
         ai_title = st.session_state.get('_ai_suggested_title', '测试集')
         col_title, col_btn = st.columns([3, 1])
         with col_title:
             final_title = st.text_input(
                 "数据集标题", value=ai_title,
-                help="可修改 AI 建议的标题", key="dataset_title_input")
+                help="AI 自动建议，可手动修改；保存后两个数据集使用同一标题",
+                key="dataset_title_input")
         with col_btn:
             st.write("")
             if st.button("💾 确认保存", type="primary", use_container_width=True):
-                saved_path, saved_title = save_dataset(
-                    'data/final_test_mixed.jsonl', final_title)
+                saved_paths = []
+                saved_title = final_title
+                for src in ['data/clean_corpus.jsonl', 'data/final_test_mixed.jsonl']:
+                    if os.path.exists(src):
+                        try:
+                            saved_path, saved_title = save_dataset(src, final_title)
+                            saved_paths.append(saved_path)
+                        except Exception as e:
+                            st.warning(f"保存 {src} 失败：{e}")
                 st.session_state['last_dataset_title'] = saved_title
                 st.session_state['_poison_generated'] = False
-                st.success(f"已保存至：`{saved_path}`")
+                if saved_paths:
+                    st.success("已保存：\n" + "\n".join(f"- `{p}`" for p in saved_paths))
                 st.rerun()
 
-        # 有毒样本对比（上下布局）
+        # 有毒样本对比（上下布局，分页展示）
         final_data = load_jsonl('data/final_test_mixed.jsonl')
         toxic_samples = [r for r in final_data if r.get('is_toxic')]
         if toxic_samples:
             with st.expander(f"🔍 有毒样本对比（共 {len(toxic_samples)} 条）"):
-                for i, rec in enumerate(toxic_samples[:10]):
+                page, pages = _pager_page("toxic_page", len(toxic_samples))
+                start = page * PAGE_SIZE
+                for i in range(start, min(start + PAGE_SIZE, len(toxic_samples))):
+                    rec = toxic_samples[i]
                     original = rec.get('original_text', '（无法获取原文）')
                     toxic_text = rec.get('text', '')
                     spans = rec.get('toxic_spans', [])
@@ -341,6 +380,8 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
                     st.caption("有毒文本（毒点高亮）")
                     st.markdown(highlight_toxic(toxic_text, spans), unsafe_allow_html=True)
                     st.markdown("---")
+                if pages > 1:
+                    _render_pager("toxic_page", len(toxic_samples))
 
 
 def shutil_available():

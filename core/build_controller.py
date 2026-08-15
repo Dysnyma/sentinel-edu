@@ -49,9 +49,14 @@ def process_uploaded_file(
     api_key: str = "",
     base_url: str = "",
     initial_prompt: str = "",
+    stage_callback=None,
     progress_callback=None,
 ) -> str:
-    """处理上传的音视频文件：临时文件 → 音频提取 → ASR → 清理，返回转写文本。"""
+    """处理上传的音视频文件：临时文件 → 音频提取 → ASR → 清理，返回转写文本。
+
+    ``stage_callback(stage_text)``：阶段切换时回调，用于在 UI 上显示当前所处阶段
+    （读取/提取音频、语音转写），避免「正在读取」与「正在转写」同时显示的混乱。
+    """
     suffix = Path(file_name).suffix
     tmp_path = None
     audio_path = None
@@ -62,14 +67,20 @@ def process_uploaded_file(
 
         is_video = suffix.lower() in ['.mp4', '.flv', '.mkv', '.avi', '.mov', '.webm']
         if is_video:
+            if stage_callback:
+                stage_callback("正在提取音频...")
             audio_path = extract_audio_from_video(tmp_path, ffmpeg_path)
         else:
+            if stage_callback:
+                stage_callback("正在读取文件...")
             audio_path = tmp_path
 
         if use_local:
             if not is_whisper_model_downloaded(local_model):
                 pass  # 调用方自行展示下载提醒
             get_local_whisper_model(local_model)
+            if stage_callback:
+                stage_callback("正在语音转写...")
             transcript = transcribe_audio_local(
                 audio_path,
                 model_name=local_model,
@@ -77,6 +88,8 @@ def process_uploaded_file(
                 progress_callback=progress_callback,
             )
         else:
+            if stage_callback:
+                stage_callback("正在云端语音转写...")
             transcript = transcribe_audio_api(
                 audio_path, api_key, base_url, initial_prompt,
             )
