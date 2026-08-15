@@ -102,3 +102,6 @@ downloads/*
 !downloads/.gitkeep
 # 外部二进制工具
 BBDown
+
+# LLM 合并源码文件
+all_py_code.txt
