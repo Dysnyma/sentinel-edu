@@ -161,6 +161,9 @@ def run_text_correction(
 ) -> tuple[list[str], list[tuple[int, str]]]:
     """逐条调用 LLM 纠错。单条失败时保留原句并记录错误。
 
+    失败包括两类：调用抛异常、LLM 返回空文本（常见于内容安全策略拒绝）。
+    两者均回退原句并写入 errors，保证输出与输入等长且不含空文本。
+
     返回 (corrected_list, errors)：
     - corrected_list: 与输入等长的纠错后文本列表
     - errors: [(index, error_message), ...]
@@ -170,8 +173,12 @@ def run_text_correction(
     total = len(texts)
     for i, text in enumerate(texts):
         try:
-            corr = correct_text(text, api_key, base_url, model)
-            corrected.append(corr)
+            corr = correct_text(text, api_key, base_url, model).strip()
+            if not corr:
+                errors.append((i, "LLM 返回空文本（可能因内容安全策略），保留原句"))
+                corrected.append(text)
+            else:
+                corrected.append(corr)
         except Exception as e:
             corrected.append(text)  # 失败时保留原句
             errors.append((i, str(e)))

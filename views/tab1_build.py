@@ -224,13 +224,15 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
                 progress_callback=_corr_update,
             )
             st.session_state['corrected_texts'] = corrected
+            st.session_state['correction_errors'] = dict(errors)
             st.success(f"纠错完成，共 {total} 条，耗时 {time.time() - t_start:.0f}s")
-            for idx, msg in errors:
-                st.warning(f"第{idx}条纠错失败，保留原句：{msg}")
+            if errors:
+                st.warning(f"⚠️ 有 {len(errors)} 条纠错失败（已保留原句），详见对比区域标注")
 
     # ── 纠错对比区域 ────────────────────────────────────────────
     corrected = st.session_state.get('corrected_texts')
     raw = st.session_state.get('raw_texts')
+    corr_errors = st.session_state.get('correction_errors', {})
     if corrected and raw and len(corrected) == len(raw):
         with st.expander(f"📊 纠错前后对比（共 {len(corrected)} 条）"):
             page, pages = _pager_page("corr_page", len(corrected))
@@ -238,14 +240,21 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
             for i in range(start, min(start + PAGE_SIZE, len(corrected))):
                 orig, corr = raw[i], corrected[i]
                 orig_html, corr_html = _highlight_diff(orig, corr)
-                st.markdown(f"**条目 {i + 1}**" + ("（无改动）" if orig == corr else ""))
-                col_l, col_r = st.columns(2)
-                with col_l:
+                if i in corr_errors:
+                    st.markdown(f"**条目 {i + 1}** ⚠️ 纠错失败，已保留原句（{corr_errors[i]}）")
                     st.caption("原文")
                     st.markdown(orig_html, unsafe_allow_html=True)
-                with col_r:
-                    st.caption("纠错后")
+                    st.caption("纠错后（已回退为原文）")
                     st.markdown(corr_html, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"**条目 {i + 1}**" + ("（无改动）" if orig == corr else ""))
+                    col_l, col_r = st.columns(2)
+                    with col_l:
+                        st.caption("原文")
+                        st.markdown(orig_html, unsafe_allow_html=True)
+                    with col_r:
+                        st.caption("纠错后")
+                        st.markdown(corr_html, unsafe_allow_html=True)
                 st.markdown("---")
             if pages > 1:
                 _render_pager("corr_page", len(corrected))
