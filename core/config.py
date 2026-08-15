@@ -31,6 +31,9 @@ def save_config_to_file():
 
 def load_config_from_file():
     """从文件加载配置，覆盖 session_state 中的对应值。仅首次运行生效。"""
+    if st.session_state.get('_config_loaded'):
+        return
+    st.session_state['_config_loaded'] = True
     if not os.path.exists(CONFIG_FILE):
         return
     try:

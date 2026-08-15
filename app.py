@@ -37,68 +37,66 @@ os.makedirs("downloads", exist_ok=True)
 def global_settings_dialog():
     tab1, tab2, tab3 = st.tabs(["🔌 API 与网络", "🛠️ 本地工具", "🧠 提示词工程"])
 
+    # ---- 草稿区：只读快照到局部变量，编辑不直接改动 session_state ----
+    # 标准模式：所有修改在「保存」按钮一次性提交（见下方提交区）
     with tab1:
         st.subheader("大模型 API 配置")
         st.caption("填写 API 地址与模型名，点击「测试连接」验证连通性。")
 
-        # 唯一编辑入口，直接绑定 session_state（侧边栏不再有 widget 冲突）
-        st.text_input("API Key（本地模型可留空）", type="password", key="openai_api_key")
-        st.text_input("API Base URL（例如 https://api.openai.com/v1）", key="openai_base_url")
-        st.text_input("LLM 模型（例如 gpt-4o-mini）", key="llm_model")
+        draft_api_key = st.text_input(
+            "API Key（本地模型可留空）", type="password",
+            value=st.session_state.get('openai_api_key', ''))
+        draft_base_url = st.text_input(
+            "API Base URL（例如 https://api.openai.com/v1）",
+            value=st.session_state.get('openai_base_url', ''))
+        draft_llm_model = st.text_input(
+            "LLM 模型（例如 gpt-4o-mini）",
+            value=st.session_state.get('llm_model', ''))
+        draft_concurrency = st.slider(
+            "并发请求数（加速生成/检测）", 1, 6,
+            value=st.session_state.get('dialog_concurrency', 3),
+            help="同时调用大模型的数量，提高速度但可能触发限流。")
 
         st.markdown("---")
-        col_test, col_save = st.columns([1, 1])
-        with col_test:
-            if st.button("🔍 测试连接", use_container_width=True):
-                with st.spinner("测试 API 连通性..."):
-                    ok, msg = check_api_connection(
-                        st.session_state.get('openai_api_key', '').strip(),
-                        st.session_state.get('openai_base_url', '').strip(),
-                        st.session_state.get('llm_model', '').strip(),
-                    )
-                    if ok:
-                        st.success(msg)
-                    else:
-                        st.error(msg)
-        with col_save:
-            if st.button("💾 保存配置到文件", type="primary", use_container_width=True):
-                save_config_to_file()
-                st.success("配置已持久化保存")
-                time.sleep(0.5)
-                st.rerun()
-
-        st.markdown("---")
-        st.slider("并发请求数（加速生成/检测）", 1, 6,
-                  key="dialog_concurrency",
-                  help="同时调用大模型的数量，提高速度但可能触发限流。")
-
-        col_clear, _ = st.columns([1, 1])
-        with col_clear:
-            if st.button("🗑️ 清除本地保存", use_container_width=True):
-                try:
-                    os.remove(CONFIG_FILE)
-                    st.success("已清除本地保存的配置")
-                except OSError:
-                    pass
+        if st.button("🔍 测试连接", use_container_width=True):
+            with st.spinner("测试 API 连通性..."):
+                ok, msg = check_api_connection(
+                    draft_api_key.strip(), draft_base_url.strip(), draft_llm_model.strip(),
+                )
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
 
     with tab2:
         st.subheader("语音识别 (ASR)")
-        st.checkbox("使用本地 Whisper 模型（免费，离线）", key="use_local_whisper")
-        if st.session_state.use_local_whisper:
-            st.selectbox(
-                "模型大小", ["tiny", "base", "small", "medium", "large"],
-                key="local_whisper_model",
+        draft_use_local_whisper = st.checkbox(
+            "使用本地 Whisper 模型（免费，离线）",
+            value=st.session_state.get('use_local_whisper', False))
+        if draft_use_local_whisper:
+            _whisper_options = ["tiny", "base", "small", "medium", "large"]
+            _current_model = st.session_state.get('local_whisper_model', 'small')
+            _current_index = _whisper_options.index(_current_model) if _current_model in _whisper_options else 2
+            draft_whisper_model = st.selectbox(
+                "模型大小", _whisper_options,
+                index=_current_index,
                 help="越大越准确，但更慢更占内存。推荐 small 或 medium。",
             )
-            if is_whisper_model_downloaded(st.session_state.local_whisper_model):
-                st.caption(f"✅ Whisper {st.session_state.local_whisper_model} 模型已下载")
+            if is_whisper_model_downloaded(draft_whisper_model):
+                st.caption(f"✅ Whisper {draft_whisper_model} 模型已下载")
             else:
-                st.caption(f"📥 Whisper {st.session_state.local_whisper_model} 模型未下载，首次使用时将自动下载")
+                st.caption(f"📥 Whisper {draft_whisper_model} 模型未下载，首次使用时将自动下载")
+        else:
+            draft_whisper_model = st.session_state.get('local_whisper_model', 'small')
 
         st.markdown("---")
         st.subheader("系统工具路径")
-        st.text_input("FFmpeg 自定义路径", key="ffmpeg_path")
-        st.text_input("BBDown 自定义路径", key="bbdown_path")
+        draft_ffmpeg_path = st.text_input(
+            "FFmpeg 自定义路径",
+            value=st.session_state.get('ffmpeg_path', 'ffmpeg'))
+        draft_bbdown_path = st.text_input(
+            "BBDown 自定义路径",
+            value=st.session_state.get('bbdown_path', './BBDown'))
 
     with tab3:
         if 'prompts' not in st.session_state:
@@ -134,6 +132,31 @@ def global_settings_dialog():
                 }
                 save_prompts(scan, poison, correct)
                 st.success("✅ 提示词已保存")
+
+    # ---- 提交区：一次性写回 session_state，再落盘，最后关闭弹窗 ----
+    st.markdown("---")
+    col_save, col_clear = st.columns([1, 1])
+    with col_save:
+        if st.button("💾 保存配置到文件", type="primary", use_container_width=True):
+            st.session_state.openai_api_key = draft_api_key.strip()
+            st.session_state.openai_base_url = normalize_base_url(draft_base_url)
+            st.session_state.llm_model = draft_llm_model.strip()
+            st.session_state.dialog_concurrency = draft_concurrency
+            st.session_state.use_local_whisper = draft_use_local_whisper
+            st.session_state.local_whisper_model = draft_whisper_model
+            st.session_state.ffmpeg_path = draft_ffmpeg_path.strip()
+            st.session_state.bbdown_path = draft_bbdown_path.strip()
+            save_config_to_file()
+            st.success("配置已保存")
+            time.sleep(0.5)
+            st.rerun()
+    with col_clear:
+        if st.button("🗑️ 清除本地保存", use_container_width=True):
+            try:
+                os.remove(CONFIG_FILE)
+                st.success("已清除本地保存的配置")
+            except OSError:
+                pass
 
 # ---------- 快捷侧边栏 ----------
 st.sidebar.header("🛡️ Sentinel-Edu")
@@ -173,14 +196,6 @@ else:
 st.sidebar.markdown("---")
 if st.sidebar.button("⚙️ 全局设置", use_container_width=True, type="primary"):
     global_settings_dialog()
-
-# ---------- 自动持久化配置（用 session_state 原始值比较，避免 normalize 干扰） ----------
-_raw_base = st.session_state.get('openai_base_url', '').strip()
-_current = {'openai_api_key': _api_key, 'openai_base_url': _raw_base, 'llm_model': _llm_model}
-_last_saved = st.session_state.get('_last_saved_config', {})
-if _current != _last_saved:
-    save_config_to_file()
-    st.session_state['_last_saved_config'] = _current
 
 concurrency = st.session_state.dialog_concurrency
 use_local_whisper = st.session_state.use_local_whisper
