@@ -11,6 +11,7 @@ from core.build_controller import (
     process_bilibili_url,
     run_text_correction,
     run_poison_generation,
+    save_transcript,
 )
 from core.utils import texts_to_jsonl, save_dataset, load_jsonl
 from views.helpers import highlight_toxic
@@ -135,6 +136,7 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
                     )
                     update_cb(1.0)
                     st.success("转写完成")
+                    save_transcript(transcript)
                     st.session_state['asr_transcript'] = transcript
                 except Exception as e:
                     st.error(f"处理文件失败：{e}")
@@ -174,6 +176,7 @@ def render_tab1(api_ready, api_key, base_url, llm_model, concurrency,
                     )
                     update_cb(1.0)
                     st.success("处理完成")
+                    save_transcript(transcript)
                     st.session_state['bili_transcript'] = transcript
                 except Exception as e:
                     st.error(f"处理失败：{e}")

@@ -265,6 +265,28 @@ def run_poison_generation(
 #  5. 数据集自动保存
 # ---------------------------------------------------------------------------
 
+TRANSCRIPT_FILE = 'data/transcript.txt'
+
+
+def save_transcript(transcript: str) -> str:
+    """将 ASR 转写结果落盘到 ``data/transcript.txt``，供刷新后恢复。"""
+    os.makedirs('data', exist_ok=True)
+    with open(TRANSCRIPT_FILE, 'w', encoding='utf-8') as f:
+        f.write(transcript)
+    return TRANSCRIPT_FILE
+
+
+def load_saved_transcript() -> str:
+    """读取已落盘的转写文本，不存在时返回空字符串。"""
+    if not os.path.exists(TRANSCRIPT_FILE):
+        return ''
+    try:
+        with open(TRANSCRIPT_FILE, 'r', encoding='utf-8') as f:
+            return f.read()
+    except OSError:
+        return ''
+
+
 def transcribe_and_save_dataset(
     transcript: str,
     api_key: str = "",
