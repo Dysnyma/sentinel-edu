@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# pytest 缓存
+.pytest_cache/
+
 # Virtual environment
 venv/
 env/

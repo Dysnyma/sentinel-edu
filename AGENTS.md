@@ -8,7 +8,7 @@ Sentinel-Edu: Streamlit app (Python) for classroom-content safety analysis via D
 - Tests: `venv/bin/python -m pytest tests` from repo root (project has no pytest config; `tests/` has `__init__.py`).
 - Run one test: `venv/bin/python -m pytest tests/test_llm_client.py -k test_name`.
 - Lint: `venv/bin/flake8 core/ views/ app.py --max-line-length=120 --ignore=E501,W503`.
-- `test/code_audit.sh` (singular `test/`) runs flake8 + bandit + pip-audit and writes `test/code_audit_report.md`.
+- `audit/code_audit.sh` runs flake8 + bandit + pip-audit and writes `audit/code_audit_report.md`. (Note: `audit/` = 代码审计脚本，`tests/` = pytest 单测，勿混淆。)
 - `bash merge_py.sh` regenerates `all_py_code.txt` (all Python concatenated for LLM context).
 
 ## Test suite gotchas (important)
